@@ -1,0 +1,30 @@
+{
+  "name": "small-change",
+  "version": "0.1.0",
+  "description": "Decides whether a Bitbucket Cloud pull request qualifies as a small change.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zereight/small-change.git"
+  },
+  "bin": {
+    "small-change": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"test/*.test.ts\"",
+    "start": "node src/cli.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2"
+  }
+}

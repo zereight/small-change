@@ -1,0 +1,138 @@
+# small-change
+
+Decides whether a Bitbucket Cloud pull request is a *small change*: small enough, and low-risk
+enough, to skip a full review. It reads the PR through the Bitbucket API, checks five rules, prints
+which ones hold, and exits with a code a pipeline can act on.
+
+```sh
+small-change https://bitbucket.org/team/platform/pull-requests/128 --kind backend
+```
+
+```
+team/platform#128 "Round invoice totals to the currency's minor unit" by Alice
+
+PASS  size             55 lines changed (must be fewer than 1000)
+FAIL  review-findings  1 unresolved finding(s) matching /\bP[12]\b/i
+      - #9 review-bot: **P2** Rounding differs for JPY
+SKIP  author-history   not checked: another check already failed
+PASS  services         2 affected service(s) (must be fewer than 3)
+      - libs/money
+      - services/billing
+FAIL  exclusions       1 changed path(s) excluded
+      - libs/money/index.ts (excluded by "libs/")
+
+Result: not a small change
+```
+
+Exit code `0`: a small change. `1`: not a small change. `2`: usage error, or Bitbucket could not be
+read.
+
+## The rules
+
+A PR is a small change only if **all** of these hold.
+
+| Rule | Default | Options |
+| --- | --- | --- |
+| **size**: fewer than N lines changed, added plus removed | 1000 | `--max-lines` |
+| **review-findings**: no unresolved P1 or P2 finding from the automated review | `\bP[12]\b`, any commenter | `--bot`, `--finding-pattern` |
+| **author-history**: the author has merged at least N PRs in *each* affected service | 10 | `--min-merged`, `--history-limit` |
+| **services**: fewer than N affected services | frontend 1, backend 3 | `--kind`, `--max-services`, `--service-depth` |
+| **exclusions**: no changed path is listed in `.small_change` | none excluded | |
+
+`--kind frontend|backend` picks the service limit of the monorepo; `--max-services <n>` sets it
+directly. One of the two is required.
+
+The author-history check reads many PRs, so it runs only when the other four pass. When one of
+them fails, it is reported as `SKIP`: the PR is not a small change whatever the history says.
+
+### Excluding paths: `.small_change`
+
+Shared libraries and sensitive paths (anything that moves money, say) never qualify. List them in a
+`.small_change` file at the repository root. It follows the core of `.gitignore` syntax:
+
+```gitignore
+# shared libraries
+libs/
+packages/design-system/
+
+# money movement, wherever it sits in the tree
+payments
+**/ledger/**
+
+# the root build files
+/Makefile
+*.lock
+```
+
+- `#` starts a comment; blank lines are ignored.
+- A trailing `/` matches directories only. A pattern that names a directory covers everything under it.
+- A pattern with a `/` at the start or in the middle is anchored to the repository root; one without
+  matches at any depth.
+- `*` and `?` stay within one path segment; `**` crosses segments.
+- Negation (`!`) is refused with an error, because ignoring it would silently widen what counts as
+  small.
+
+The file is read from the **destination branch**, never from the PR, and a PR that changes
+`.small_change` itself is never a small change. Otherwise a PR could lift its own exclusions.
+
+## Install
+
+Requires Node.js 24 or later.
+
+```sh
+git clone https://github.com/zereight/small-change.git
+cd small-change
+npm install
+npm run build
+node dist/cli.js --help
+```
+
+## Authentication
+
+Set `BITBUCKET_TOKEN` to an access token that can read the repository's pull requests and contents.
+It is sent as a `Bearer` token to `api.bitbucket.org` only, and never printed. Public repositories
+work without a token, but Bitbucket limits anonymous requests heavily (HTTP 429). One run makes about
+five requests, plus, for the author-history check, one per page of the author's PR list and two for
+each PR it reads.
+
+## Choices to check
+
+The rules leave room for interpretation. These are the choices made here; each is easy to change.
+
+- **A service is a directory.** The first `--service-depth` directories of a path (default 2, so
+  `services/payments`). A file at the repository root belongs to the service `.`, which counts as
+  one.
+- **The limits are strict.** "Fewer than N" means `count < N`. With `--kind frontend` (N = 1) only a
+  PR that affects no service passes, so a PR that touches even one frontend service fails. If the
+  rule should read "at most one", pass `--max-services 2`.
+- **Author history is per service.** The author's merged PRs are read newest first, one by one, and
+  a PR counts for every affected service it touches. It stops when each service has enough, or after
+  `--history-limit` PRs (default 100), in which case the check fails.
+- **Only unresolved findings count.** Without `--bot`, a comment from anyone that matches the
+  pattern is a finding; `--bot` narrows that to the named review bots (name, nickname or UUID).
+- **A renamed file counts on both sides**: its old and new path are both checked against the
+  exclusions and both name a service.
+- **Files that Bitbucket leaves out of a diff** by its own exclusion patterns (lock files, by
+  default) count as zero lines.
+
+## Not covered
+
+- Bitbucket Data Center. Only `https://bitbucket.org/<workspace>/<repo>/pull-requests/<id>` URLs.
+- Atlassian account API tokens, which use Basic authentication. Only a Bearer access token.
+- Acting on the verdict: the tool reports, and the pipeline decides what to do with the exit code.
+- Whether a PR from a fork can be read has not been verified.
+
+## Development
+
+```sh
+npm test            # node --test, running the TypeScript sources directly
+npm run typecheck
+npm run build
+```
+
+No runtime dependencies. The checks are pure functions over data (`src/checks.ts`); `src/bitbucket.ts`
+is the only module that talks to the network.
+
+## License
+
+MIT
