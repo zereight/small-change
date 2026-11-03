@@ -115,21 +115,23 @@ export async function runModelSetup(deps: SetupDeps, flags: SetupFlags): Promise
     // Apply the budget
     let effort: Effort | undefined;
     const target = BUDGETS[budget];
-    if (providerId === "cursor") {
+    if (provider.effortStyle === "slug") {
       // The effort is part of the slug, so the budget moves it there.
       const retargeted = retargetSlug(model, target, models.map((info) => info.id));
       if (retargeted === undefined && model !== DEFAULT_MODEL) {
         throw new Error(`No variant of ${model} runs at ${target} effort or lower; pick another model or budget`);
       }
       model = retargeted ?? model;
-    } else if (providerId === "codex") {
-      const supported = models.find((info) => info.id === model)?.efforts;
-      effort = supported === undefined ? target : clampEffort(target, supported);
-      if (effort === undefined) {
-        throw new Error(`${model} supports only ${supported?.join(", ")}, all above ${target}; pick another model or budget`);
-      }
     } else {
-      effort = target;
+      const supported = models.find((info) => info.id === model)?.efforts;
+      if (supported === undefined) {
+        effort = target;
+      } else if (supported.length > 0) {
+        effort = clampEffort(target, supported);
+        if (effort === undefined) {
+          throw new Error(`${model} supports only ${supported.join(", ")}, all above ${target}; pick another model or budget`);
+        }
+      }
     }
 
     const config: ModelConfig = {
@@ -144,7 +146,7 @@ export async function runModelSetup(deps: SetupDeps, flags: SetupFlags): Promise
     out(`  Provider  ${provider.label}`);
     out(`  Model     ${model === DEFAULT_MODEL ? `${DEFAULT_MODEL} (the CLI's own default)` : model}`);
     out(`  Budget    ${BUDGET_LABELS[budget]}`);
-    out(`  Effort    ${effort ?? "set by the model slug"}`);
+    out(`  Effort    ${effort ?? (provider.effortStyle === "slug" ? "set by the model slug" : "none: the model has no reasoning levels")}`);
     out(`  Config    ${deps.configFile}`);
     out();
 
@@ -423,7 +425,7 @@ export async function listModels(
     }
     out(`${provider.label} (\`${provider.binary}\`)${models === undefined ? ": cannot list models; suggestions" : ""}`);
     for (const info of models ?? provider.suggestedModels) {
-      out(`  ${info.id}${info.label && info.label !== info.id ? ` - ${info.label}` : ""}${info.efforts ? ` [${info.efforts.join(", ")}]` : ""}`);
+      out(`  ${info.id}${info.label && info.label !== info.id ? ` - ${info.label}` : ""}${info.efforts ? ` [${info.efforts.length > 0 ? info.efforts.join(", ") : "no reasoning levels"}]` : ""}`);
     }
   }
 }

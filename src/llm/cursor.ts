@@ -10,6 +10,7 @@ export const cursor: Provider = {
   id: "cursor",
   label: "Cursor agent",
   binary: "agent",
+  effortStyle: "slug",
   isInstalled: (exec) => canRun(exec, "agent"),
   async listModels(exec) {
     const result = await exec("agent", ["--list-models"], { timeoutMs: 60_000 });

@@ -2,13 +2,13 @@
 export const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 export type Effort = (typeof EFFORTS)[number];
 
-export type ProviderId = "claude" | "cursor" | "codex";
+export type ProviderId = "claude" | "cursor" | "codex" | "pi" | "muse";
 
 export interface ModelInfo {
   /** What is passed to the agent CLI as the model. */
   id: string;
   label?: string;
-  /** The efforts this model accepts, when the CLI says. */
+  /** The efforts this model accepts, when the CLI says. Empty: the model has no reasoning levels. */
   efforts?: readonly Effort[];
 }
 
@@ -48,10 +48,12 @@ export interface RunRequest {
   timeoutMs: number;
 }
 
-/** An agent CLI that Tulip-style runs drive headlessly: no API key, just a logged-in CLI. */
+/** An agent CLI that is driven headlessly: no API key, just a logged-in CLI. */
 export interface Provider {
   id: ProviderId;
   label: string;
+  /** How the reasoning effort reaches the CLI: a flag, or inside the model slug. */
+  effortStyle: "flag" | "slug";
   /** The executable on PATH. */
   binary: string;
   isInstalled(exec: Exec): Promise<boolean>;

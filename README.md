@@ -28,7 +28,7 @@ Exit code `0`: a small change. `1`: not a small change. `2`: usage error, or Bit
 read.
 
 The check itself calls no LLM. A separate `review` command can have an agent CLI you are already
-logged in to (Claude Code, Cursor's `agent`, or Codex) review the PR and post findings that the
+logged in to (Claude Code, Cursor's `agent`, Codex, Pi, or Muse Code) review the PR and post findings that the
 check then counts; see [Reviewing with an LLM](#reviewing-with-an-llm).
 
 ## How a run works
@@ -145,6 +145,8 @@ logged in to, headless.
 | `claude` | `claude` | Cannot be listed; aliases are suggested (`opus`, `sonnet`, `haiku`, ...) | `--effort` |
 | `cursor` | `agent` | `agent --list-models` | The effort is part of the model slug (`grok-4.7-xhigh`), so the budget swaps the slug |
 | `codex` | `codex` | `codex debug models` | `-c model_reasoning_effort=...`, clamped to what the model supports |
+| `pi` | `pi` | `pi --list-models`, as `provider/model` | `--thinking`; a model without thinking gets no effort |
+| `muse` | `muse` | Cannot be listed; `muse-spark-1.3` is suggested | `--reasoning-effort` |
 
 ### Choosing the model: `small-change model setup`
 
@@ -189,8 +191,10 @@ twice. Other flags: `--language`, `--max-findings`, `--max-diff-bytes`, `--timeo
 
 What keeps an untrusted PR from steering the review:
 
-- The agent runs in an empty temporary directory with its tools off (Claude), read-only and in
-  `ask` mode with a sandbox (Cursor), or in a read-only sandbox (Codex). It sees the prompt only.
+- The agent runs in an empty temporary directory with its tools off (Claude, Pi), read-only and in
+  `ask` mode with a sandbox (Cursor), in a read-only sandbox (Codex), or with shell, file writes,
+  web tools and questions off in the bare `empty` preset (Muse). Pi also runs with its extensions,
+  skills, context files and MCP servers off. It sees the prompt only.
 - Its environment has no `BITBUCKET_*` variable, so it never holds the token that can comment.
   Posting is done by this tool, never by the agent.
 - The title, description and diff sit between markers that are random on every run, and the agent
@@ -207,6 +211,14 @@ Limits observed on a real machine:
 - Codex's model catalog lists models that a ChatGPT login rejects (`model_not_found`). Setup's
   one-word request catches this and saves nothing. Every Codex model tried here was rejected, so a
   full Codex run has not been seen to succeed.
+- Pi runs with extensions off, so a model that only an extension provides (a `claude-bridge`
+  provider, for example) is not available. A model can still be listed and fail: here,
+  `cursorapi/composer-2.5` was listed and answered `Connection error`, and the one-word request
+  refused to save it.
+- Muse has no command to list models and accepts any model id in `model-profile`, so only a
+  request tells whether a model works: `muse-spark-1.3` did here, `muse-wonder-1.0` was refused
+  for this account. Muse still loads the user's installed skills (115 here) into the run, even with
+  the `empty` preset and without other tools' skills; the prompt is larger than it needs to be.
 - For Cursor, a slug with no effort token (`gpt-5.3-codex`, `auto`, `composer-2.5`) is used as it
   is, whatever the budget.
 - `--post` has not been run against a real PR.

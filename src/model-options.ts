@@ -1,6 +1,6 @@
 import { parseArgs } from "node:util";
 import { isBudget } from "./llm/budget.ts";
-import { isProviderId } from "./llm/providers.ts";
+import { isProviderId, PROVIDER_IDS } from "./llm/providers.ts";
 import type { Budget } from "./llm/budget.ts";
 import type { ProviderId } from "./llm/types.ts";
 import { UsageError } from "./options.ts";
@@ -15,7 +15,7 @@ Commands:
   list                     Print the models of the installed agent CLIs
 
 Options for setup:
-  --provider <id>          claude, cursor or codex
+  --provider <id>          ${PROVIDER_IDS.join(", ")}
   --model <id>             A model id, or "default" for the CLI's own default
   --budget <name>          unlimited (max effort), large (xhigh), medium (high) or small (medium)
   --yes                    Save without asking to confirm
@@ -107,7 +107,7 @@ function parse(argv: string[]) {
 
 function providerId(value: string): ProviderId {
   if (!isProviderId(value)) {
-    throw new UsageError(`Invalid --provider "${value}": expected claude, cursor or codex`);
+    throw new UsageError(`Invalid --provider "${value}": expected one of ${PROVIDER_IDS.join(", ")}`);
   }
   return value;
 }

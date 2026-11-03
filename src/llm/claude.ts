@@ -11,6 +11,7 @@ export const claude: Provider = {
   id: "claude",
   label: "Claude Code",
   binary: "claude",
+  effortStyle: "flag",
   isInstalled: (exec) => canRun(exec, "claude"),
   listModels: async () => undefined,
   suggestedModels: [

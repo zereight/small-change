@@ -5,6 +5,8 @@ import { claude, parseClaudeOutput } from "../src/llm/claude.ts";
 import { codex, codexError, parseCodexModels } from "../src/llm/codex.ts";
 import { cursor, parseCursorModels, parseCursorOutput } from "../src/llm/cursor.ts";
 import { agentEnv, defaultExec } from "../src/llm/exec.ts";
+import { muse, parseMuseOutput } from "../src/llm/muse.ts";
+import { parsePiModels, pi } from "../src/llm/pi.ts";
 import type { Exec, RunRequest } from "../src/llm/types.ts";
 
 const REQUEST: RunRequest = {
@@ -194,6 +196,119 @@ describe("codex", () => {
       stderr: 'ERROR: {"error":{"message":"model_not_found for this account"}}',
     }));
     await assert.rejects(codex.run(exec, REQUEST), /codex failed: model_not_found for this account/);
+  });
+});
+
+describe("pi", () => {
+  const LIST = [
+    "provider       model                       context  max-out  thinking  images",
+    "cursorapi      composer-2.5                200K     65.5K    no        no    ",
+    "opencode-go    claude-haiku-5-5            1M       128K     yes       yes   ",
+    "opencode-go    gemini-4-argon-contributor  1.0M     65.5K    yes       yes   ",
+    "",
+  ].join("\n");
+
+  it("parses the table into provider/model ids, and marks models without thinking", () => {
+    assert.deepEqual(parsePiModels(LIST), [
+      { id: "cursorapi/composer-2.5", label: "composer-2.5 (cursorapi)", efforts: [] },
+      { id: "opencode-go/claude-haiku-5-5", label: "claude-haiku-5-5 (opencode-go)" },
+      { id: "opencode-go/gemini-4-argon-contributor", label: "gemini-4-argon-contributor (opencode-go)" },
+    ]);
+    assert.deepEqual(parsePiModels("Error: nothing\n"), []);
+  });
+
+  it("lists models with every extension off, from stdout only", async () => {
+    const { exec, calls } = recording(async () => ({ code: 0, stdout: LIST, stderr: 'Warning: No models match pattern "x/y"' }));
+    assert.equal((await pi.listModels(exec))?.length, 3);
+    assert.ok(calls[0]?.args.includes("--no-extensions") && calls[0].args.at(-1) === "--list-models");
+  });
+
+  it("runs with tools, extensions, skills, context files and MCP off, and the prompt on stdin", async () => {
+    const { exec, calls } = recording(async () => ({ code: 0, stdout: "answer\n", stderr: "" }));
+    assert.equal(await pi.run(exec, { ...REQUEST, model: "opencode-go/claude-haiku-5-5", effort: "high" }), "answer");
+    assert.deepEqual(calls[0]?.args, [
+      "-p", "--no-tools", "--no-session", "--no-extensions", "--no-skills", "--no-context-files",
+      "--no-prompt-templates", "--no-themes", "--no-mcp", "--model", "opencode-go/claude-haiku-5-5", "--thinking", "high",
+    ]);
+    assert.equal(calls[0]?.options?.input, "Review this");
+    assert.equal(calls[0]?.options?.cwd, "/tmp/empty");
+  });
+
+  it("omits --model for the default and --thinking when there is no effort", async () => {
+    const { exec, calls } = recording(async () => ({ code: 0, stdout: "x", stderr: "" }));
+    await pi.run(exec, { ...REQUEST, model: "default", effort: undefined });
+    assert.ok(!calls[0]?.args.includes("--model") && !calls[0]?.args.includes("--thinking"));
+  });
+
+  it("fails with Pi's error, leaving out the settings warnings, and on an empty answer", async () => {
+    const bad = recording(async () => ({ code: 1, stdout: "", stderr: 'Warning: No models match pattern "a/b"\n401 Invalid credential' }));
+    await assert.rejects(pi.run(bad.exec, REQUEST), (error: Error) => {
+      assert.match(error.message, /pi exited with 1: 401 Invalid credential$/);
+      assert.ok(!error.message.includes("Warning"));
+      return true;
+    });
+    const empty = recording(async () => ({ code: 0, stdout: " \n", stderr: "" }));
+    await assert.rejects(pi.run(empty.exec, REQUEST), /printed no answer/);
+  });
+});
+
+describe("muse", () => {
+  const event = (payload_type: string, payload: object) => JSON.stringify({ payload_type, payload });
+
+  it("reads the answer from the terminal event", () => {
+    const stdout = [event("run.output.delta", { text: "partial" }), event("run.terminal.completed", { terminal: "completed", text: "OK", reason: null })].join("\n");
+    assert.deepEqual(parseMuseOutput(stdout), { ok: true, text: "OK" });
+  });
+
+  it("reports the failure reason", () => {
+    const stdout = event("run.terminal.failed", { terminal: "failed", text: "", reason: "model `x` does not exist or you lack access" });
+    assert.deepEqual(parseMuseOutput(stdout), { ok: false, error: "model `x` does not exist or you lack access" });
+  });
+
+  it("reports a terminal state it does not know, and a run with no terminal event", () => {
+    assert.deepEqual(parseMuseOutput(event("run.terminal.cancelled", { terminal: "cancelled", reason: null })), { ok: false, error: 'the run ended as "cancelled"' });
+    assert.deepEqual(parseMuseOutput(`${event("run.usage", {})}\nnot json\n`), { ok: false });
+    assert.deepEqual(parseMuseOutput(""), { ok: false });
+  });
+
+  it("runs bare, with shell, writes, web and questions off, and the prompt in a file outside the workspace", async () => {
+    let promptFile = "";
+    let promptText = "";
+    const { exec, calls } = recording(async (args) => {
+      promptFile = args[args.indexOf("--prompt-file") + 1] as string;
+      promptText = await readFile(promptFile, "utf8");
+      return { code: 0, stdout: event("run.terminal.completed", { terminal: "completed", text: "answer" }), stderr: "" };
+    });
+    assert.equal(await muse.run(exec, { ...REQUEST, model: "muse-spark-1.3", effort: "low" }), "answer");
+    const args = calls[0]?.args ?? [];
+    for (const flag of ["--json", "--no-session-log", "--disable-shell", "--disable-write", "--disable-web-tools", "--disable-request-user-input", "--disable-reminders", "--no-foreign-personal-context"]) {
+      assert.ok(args.includes(flag), flag);
+    }
+    assert.equal(args[args.indexOf("--preset") + 1], "empty");
+    assert.equal(args[args.indexOf("--workspace") + 1], "/tmp/empty");
+    assert.equal(args[args.indexOf("--model") + 1], "muse-spark-1.3");
+    assert.equal(args[args.indexOf("--reasoning-effort") + 1], "low");
+    assert.equal(promptText, "Review this");
+    assert.ok(!promptFile.startsWith("/tmp/empty"));
+    await assert.rejects(readFile(promptFile), { code: "ENOENT" });
+  });
+
+  it("omits --model for the default", async () => {
+    const { exec, calls } = recording(async () => ({ code: 0, stdout: event("run.terminal.completed", { terminal: "completed", text: "x" }), stderr: "" }));
+    await muse.run(exec, { ...REQUEST, model: "default", effort: undefined });
+    assert.ok(!calls[0]?.args.includes("--model") && !calls[0]?.args.includes("--reasoning-effort"));
+  });
+
+  it("fails with the run's reason, else with stderr", async () => {
+    const failed = recording(async () => ({ code: 1, stdout: event("run.terminal.failed", { terminal: "failed", reason: "no access" }), stderr: "" }));
+    await assert.rejects(muse.run(failed.exec, REQUEST), /muse failed: no access/);
+    const crashed = recording(async () => ({ code: 2, stdout: "", stderr: "a\nb" }));
+    await assert.rejects(muse.run(crashed.exec, REQUEST), /muse exited with 2: a\nb/);
+  });
+
+  it("cannot list models and suggests the one known to work", async () => {
+    assert.equal(await muse.listModels(async () => assert.fail("must not run")), undefined);
+    assert.ok(muse.suggestedModels.some((model) => model.id === "muse-spark-1.3"));
   });
 });
 

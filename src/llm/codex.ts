@@ -16,6 +16,7 @@ export const codex: Provider = {
   id: "codex",
   label: "OpenAI Codex",
   binary: "codex",
+  effortStyle: "flag",
   isInstalled: (exec) => canRun(exec, "codex"),
   async listModels(exec) {
     const result = await exec("codex", ["debug", "models"], { timeoutMs: 60_000 });

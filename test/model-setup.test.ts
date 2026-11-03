@@ -30,6 +30,7 @@ function fake(id: ProviderId, options: { installed?: boolean; models?: ModelInfo
     id,
     label: `Fake ${id}`,
     binary: id,
+    effortStyle: id === "cursor" ? "slug" : "flag",
     probes,
     isInstalled: async () => options.installed ?? true,
     listModels: async () => options.models,
@@ -49,6 +50,8 @@ function providers(overrides: Partial<Record<ProviderId, FakeProvider>> = {}) {
     claude: fake("claude", { suggested: [{ id: "default" }, { id: "opus" }, { id: "haiku" }] }),
     cursor: fake("cursor", { models: [{ id: "auto" }, { id: "grok-4.7-low" }, { id: "grok-4.7-medium" }, { id: "grok-4.7-high" }, { id: "grok-4.7-xhigh" }] }),
     codex: fake("codex", { models: [{ id: "gpt-6-astra", efforts: ["low", "medium", "high"] }, { id: "gpt-5.2", efforts: ["low", "medium", "high", "xhigh"] }] }),
+    pi: fake("pi", { models: [{ id: "opencode-go/claude-haiku-5-5" }, { id: "cursorapi/composer-2.5", efforts: [] }], suggested: [{ id: "default" }] }),
+    muse: fake("muse", { suggested: [{ id: "default" }, { id: "muse-spark-1.3" }] }),
     ...overrides,
   };
 }
@@ -106,6 +109,26 @@ describe("model setup with flags", () => {
     assert.equal(config.effort, "high");
     const again = await run({ provider: "codex", model: "gpt-5.2", budget: "large", yes: true }, undefined);
     assert.equal(again.config.effort, "xhigh");
+  });
+
+  it("pi: passes the budget as the effort, for any model that has reasoning levels", async () => {
+    const { config } = await run({ provider: "pi", model: "opencode-go/claude-haiku-5-5", budget: "unlimited", yes: true }, undefined);
+    assert.deepEqual(config, { version: 1, provider: "pi", model: "opencode-go/claude-haiku-5-5", budget: "unlimited", effort: "max" });
+  });
+
+  it("pi: sets no effort for a model without reasoning levels, and says so", async () => {
+    const provs = providers();
+    const { config, text } = await run({ provider: "pi", model: "cursorapi/composer-2.5", budget: "large", yes: true }, undefined, provs);
+    assert.equal(config.effort, undefined);
+    assert.equal(provs.pi.probes[0]?.effort, undefined);
+    assert.match(text, /Effort    none: the model has no reasoning levels/);
+  });
+
+  it("muse: takes a model it cannot list, since the probe checks it", async () => {
+    const provs = providers();
+    const { config } = await run({ provider: "muse", model: "muse-spark-1.3", budget: "medium", yes: true }, undefined, provs);
+    assert.deepEqual(config, { version: 1, provider: "muse", model: "muse-spark-1.3", budget: "medium", effort: "high" });
+    assert.equal(provs.muse.probes.length, 1);
   });
 
   it("rejects a model the CLI does not list, saving nothing", async () => {

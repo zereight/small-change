@@ -18,6 +18,11 @@ describe("parseModelArgs", () => {
     assert.equal(parsed.command === "setup" && parsed.verify, false);
   });
 
+  it("accepts pi and muse as providers", () => {
+    assert.deepEqual(parseModelArgs(["list", "--provider", "pi"]), { command: "list", provider: "pi" });
+    assert.deepEqual(parseModelArgs(["list", "--provider", "muse"]), { command: "list", provider: "muse" });
+  });
+
   it("parses show and list", () => {
     assert.deepEqual(parseModelArgs(["show", "--config", "/c.json"]), { command: "show", config: "/c.json" });
     assert.deepEqual(parseModelArgs(["list", "--provider", "codex"]), { command: "list", provider: "codex" });
@@ -26,7 +31,7 @@ describe("parseModelArgs", () => {
   it("rejects bad input", () => {
     assert.throws(() => parseModelArgs([]), UsageError);
     assert.throws(() => parseModelArgs(["wat"]), /Unknown command "wat"/);
-    assert.throws(() => parseModelArgs(["setup", "--provider", "gemini"]), /Invalid --provider/);
+    assert.throws(() => parseModelArgs(["setup", "--provider", "gemini"]), /Invalid --provider "gemini": expected one of claude, cursor, codex, pi, muse/);
     assert.throws(() => parseModelArgs(["setup", "--budget", "huge"]), /Invalid --budget/);
     assert.throws(() => parseModelArgs(["setup", "extra"]), /Unexpected extra/);
     assert.throws(() => parseModelArgs(["setup", "--bogus"]), UsageError);

@@ -59,6 +59,7 @@ function setup(world: World) {
     id: "claude",
     label: "Claude Code",
     binary: "claude",
+    effortStyle: "flag",
     isInstalled: async () => true,
     listModels: async () => undefined,
     suggestedModels: [],
