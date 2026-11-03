@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import type { BitbucketReview, ReviewComment } from "../src/bitbucket.ts";
+import type { BitbucketReview, PullRequest, ReviewComment } from "../src/bitbucket.ts";
 import type { Exec, Provider, RunRequest } from "../src/llm/types.ts";
 import type { ModelConfig } from "../src/model-config.ts";
+import type { Checkout, CheckoutRequest } from "../src/review/checkout.ts";
+import type { Hit, SearchEngine } from "../src/review/engines.ts";
 import type { Finding } from "../src/review/findings.ts";
 import { formatReview, type ReviewOptions, type ReviewResult, runReview } from "../src/review/review.ts";
 
@@ -17,6 +19,8 @@ const OPTIONS: ReviewOptions = {
   language: "English",
   post: true,
   verifier: true,
+  search: "off",
+  maxLookups: 8,
   timeoutMs: 1000,
 };
 const NO_EXEC: Exec = async () => assert.fail("exec must not be called directly");
@@ -37,16 +41,23 @@ interface World {
   description?: string;
   comments?: string[];
   answer?: string;
+  /** The reviewer's answers, one per run; `answer` after them. */
+  answers?: string[];
+  /** Fields of the pull request to set besides the defaults. */
+  pullRequest?: Partial<PullRequest>;
   failPostAt?: number;
+  /** What the full hash of the source commit is, or undefined if Bitbucket does not know it. */
+  hash?: string | undefined;
   files?: Record<string, string | Error>;
   /** A second model; its answer, or the error it fails with, or that it is not installed. */
-  verifier?: { answer?: string; error?: string; installed?: boolean };
+  verifier?: { answer?: string; answers?: string[]; error?: string; installed?: boolean };
 }
 
 function setup(world: World) {
   const posted: string[] = [];
   const requests: RunRequest[] = [];
   const reads: string[] = [];
+  const hashes: string[] = [];
   const bitbucket: BitbucketReview = {
     async getPullRequest() {
       return {
@@ -56,6 +67,7 @@ function setup(world: World) {
         author: { uuid: "{a}", name: "A" },
         sourceCommit: "abc123def456",
         destinationCommit: "dest",
+        ...world.pullRequest,
       };
     },
     async getDiff() {
@@ -79,6 +91,10 @@ function setup(world: World) {
       }
       return value;
     },
+    async getCommitHash(_repo, commit) {
+      hashes.push(commit);
+      return "hash" in world ? world.hash : "a".repeat(40);
+    },
     async getFileChanges() {
       return assert.fail("not used");
     },
@@ -96,7 +112,7 @@ function setup(world: World) {
     suggestedModels: [],
     async run(_exec, request) {
       requests.push(request);
-      return world.answer ?? '{"findings":[]}';
+      return world.answers?.[requests.length - 1] ?? world.answer ?? '{"findings":[]}';
     },
   };
   const verifierRequests: RunRequest[] = [];
@@ -111,12 +127,12 @@ function setup(world: World) {
       if (world.verifier?.error !== undefined) {
         throw new Error(world.verifier.error);
       }
-      return world.verifier?.answer ?? '{"verdicts":[]}';
+      return world.verifier?.answers?.[verifierRequests.length - 1] ?? world.verifier?.answer ?? '{"verdicts":[]}';
     },
   };
   const env = { PATH: "/bin", BITBUCKET_TOKEN: "secret-token", BITBUCKET_API_TOKEN: "secret-2" };
   const verifier = world.verifier === undefined ? {} : { verifier: { provider: second, config: VERIFIER } };
-  return { bitbucket, provider, posted, requests, verifierRequests, reads, deps: { bitbucket, provider, exec: NO_EXEC, config: CONFIG, ...verifier, env } };
+  return { bitbucket, provider, posted, requests, verifierRequests, reads, hashes, deps: { bitbucket, provider, exec: NO_EXEC, config: CONFIG, ...verifier, env } };
 }
 
 const answer = (...findings: object[]) => JSON.stringify({ findings });
@@ -378,6 +394,241 @@ describe("runReview with a verifier", () => {
   });
 });
 
+describe("runReview with lookups", () => {
+  const HASH = "a".repeat(40);
+  const CALLER = "export const sync = () => start(); // called from login only";
+
+  /** An engine that answers every grep with the given hits and records what it was asked. */
+  function fakeEngine(hits: Hit[] = [{ path: "src/login.ts", line: 12, text: CALLER }], overrides: Partial<SearchEngine> = {}) {
+    const asked: string[] = [];
+    const prepared: string[] = [];
+    const engine: SearchEngine = {
+      id: "git-grep",
+      label: "git grep",
+      binary: "git",
+      worktree: false,
+      kinds: ["grep", "file"],
+      isAvailable: async () => true,
+      prepare: async (context) => {
+        prepared.push(context.checkout.dir);
+      },
+      grep: async (_context, need) => {
+        asked.push(need.pattern);
+        return hits;
+      },
+      ...overrides,
+    };
+    return { engine, asked, prepared };
+  }
+
+  function fakeCheckout() {
+    const requests: CheckoutRequest[] = [];
+    const disposed: string[] = [];
+    const create = async (request: CheckoutRequest): Promise<Checkout> => {
+      requests.push(request);
+      return { dir: "/fake/dir", commit: request.commit, worktree: request.worktree, scratch: "/fake/scratch", dispose: async () => { disposed.push("/fake/dir"); } };
+    };
+    return { create, requests, disposed };
+  }
+
+  const asks = (...entries: object[]) => JSON.stringify({ lookups: entries });
+  const search = { ...OPTIONS, search: "git-grep" as const };
+
+  function withLookups(world: World, engine: SearchEngine, checkout = fakeCheckout()) {
+    const made = setup(world);
+    return { ...made, checkout, deps: { ...made.deps, engines: { "git-grep": engine, tgrep: engine, graft: engine }, createCheckout: checkout.create } };
+  }
+
+  it("does nothing for lookups, and does not mention them to the agent, without --search", async () => {
+    const { engine, asked } = fakeEngine();
+    const made = withLookups({ answer: answer() }, engine);
+    const result = await runReview(made.deps, REF, OPTIONS);
+    assert.equal(result.lookups, undefined);
+    assert.deepEqual(asked, []);
+    assert.equal(made.checkout.requests.length, 0);
+    assert.doesNotMatch(made.requests[0]?.prompt ?? "", /lookups/);
+    assert.deepEqual(result.calls, { reviewer: 1, verifier: 0 });
+  });
+
+  it("stops before anything is read when the engine's program is missing", async () => {
+    const { engine } = fakeEngine(undefined, { isAvailable: async () => false, id: "tgrep", binary: "tgrep" });
+    const made = withLookups({ answer: answer() }, engine);
+    await assert.rejects(runReview(made.deps, REF, { ...search, search: "tgrep" }), /--search tgrep needs `tgrep` on PATH/);
+    assert.equal(made.requests.length, 0);
+    assert.deepEqual(made.reads, []);
+    assert.equal(made.checkout.requests.length, 0);
+  });
+
+  it("offers lookups on the first turn, runs them, and gives the results on a last turn where more may not be asked", async () => {
+    const { engine, asked, prepared } = fakeEngine();
+    const made = withLookups({ answers: [asks({ grep: "sync()" }), answer()] }, engine);
+    const result = await runReview(made.deps, REF, search);
+    assert.equal(made.requests.length, 2);
+    assert.match(made.requests[0]?.prompt ?? "", /at most 8 lookups/);
+    assert.doesNotMatch(made.requests[0]?.prompt ?? "", /Lookup results \(code of the repository/);
+    assert.match(made.requests[1]?.prompt ?? "", /Lookup results \(code of the repository/);
+    assert.match(made.requests[1]?.prompt ?? "", /src\/login\.ts:12\| export const sync/);
+    assert.match(made.requests[1]?.prompt ?? "", /last turn: answer with findings now/);
+    assert.deepEqual(asked, ["sync()"]);
+    assert.deepEqual(prepared, ["/fake/dir"]);
+    assert.deepEqual(result.calls, { reviewer: 2, verifier: 0 });
+    assert.equal(result.lookups?.status, "ok");
+    assert.equal(result.lookups?.requests, 1);
+    assert.deepEqual(result.lookups?.asked, { reviewer: 1, verifier: 0 });
+  });
+
+  it("runs the agent once when it answers with findings on the first turn, and a lookup count of zero", async () => {
+    const { engine, asked } = fakeEngine();
+    const made = withLookups({ answers: [answer(proven())] }, engine);
+    const result = await runReview(made.deps, REF, search);
+    assert.equal(made.requests.length, 1);
+    assert.deepEqual(asked, []);
+    assert.equal(result.findings[0]?.severity, "P1");
+    assert.equal(result.lookups?.requests, 0);
+  });
+
+  it("takes a quote from a lookup result as proof, and a quote the agent was never shown as no proof", async () => {
+    const { engine } = fakeEngine();
+    const fromLookup = { path: "src/login.ts", line: 12, quote: "export const sync = () => start();" };
+    const invented = { path: "src/login.ts", line: 40, quote: "if (user.isAdmin) { grantEverything(); }" };
+    const made = withLookups(
+      {
+        answers: [
+          asks({ grep: "sync()" }),
+          answer(proven({ evidence: [fromLookup], path: "src/login.ts", line: 12, title: "Proven by lookup" }), proven({ evidence: [invented], path: "src/login.ts", line: 40, title: "Invented" })),
+        ],
+      },
+      engine,
+    );
+    const result = await runReview(made.deps, REF, search);
+    const byTitle = new Map(result.findings.map((finding) => [finding.title, finding]));
+    assert.equal(byTitle.get("Proven by lookup")?.severity, "P1");
+    assert.equal(byTitle.get("Invented")?.severity, "P3");
+    assert.ok(byTitle.get("Invented")?.lowered !== undefined);
+  });
+
+  it("ignores findings that come in the same answer as lookups", async () => {
+    const { engine } = fakeEngine();
+    const both = JSON.stringify({ findings: [proven()], lookups: [{ grep: "sync()" }] });
+    const made = withLookups({ answers: [both, answer()] }, engine);
+    const result = await runReview(made.deps, REF, search);
+    assert.equal(made.requests.length, 2);
+    assert.deepEqual(result.findings, []);
+  });
+
+  it("answers a request once and counts requests that were not valid or beyond the limit", async () => {
+    const { engine, asked } = fakeEngine();
+    const made = withLookups({ answers: [asks({ grep: "one" }, { grep: "one" }, { grep: "ab" }, { grep: "two" }, { grep: "three" }), answer()] }, engine);
+    const result = await runReview(made.deps, REF, { ...search, maxLookups: 2 });
+    assert.deepEqual(asked, ["one", "two"]);
+    assert.equal(result.lookups?.requests, 2);
+    assert.equal(result.lookups?.ignored >= 2, true);
+  });
+
+  it("gives the checkout the token but the engine only the PATH, and clones the full hash into the source repository", async () => {
+    const seen: string[] = [];
+    const { engine } = fakeEngine(undefined, {
+      prepare: async (context) => {
+        seen.push(JSON.stringify(context.env));
+      },
+    });
+    const made = withLookups({ answer: answer(), pullRequest: { sourceRepository: { workspace: "fork-team", repo: "fork" } } }, engine);
+    await runReview({ ...made.deps, env: { ...made.deps.env, BITBUCKET_TOKEN: "secret-token" } }, REF, search);
+    assert.deepEqual(made.checkout.requests.map((request) => [request.url, request.commit, request.token, request.worktree]), [
+      ["https://bitbucket.org/fork-team/fork.git", HASH, "secret-token", false],
+    ]);
+    assert.deepEqual(seen, ['{"PATH":"/bin"}']);
+    assert.deepEqual(made.hashes, ["abc123def456"]);
+  });
+
+  it("deletes the checkout when the review is done, and when it fails", async () => {
+    const { engine } = fakeEngine();
+    const done = withLookups({ answers: [asks({ grep: "sync()" }), answer()] }, engine);
+    await runReview(done.deps, REF, search);
+    assert.deepEqual(done.checkout.disposed, ["/fake/dir"]);
+
+    const broken = withLookups({ answers: [asks({ grep: "sync()" }), "not json"] }, engine);
+    await assert.rejects(runReview(broken.deps, REF, search));
+    assert.deepEqual(broken.checkout.disposed, ["/fake/dir"]);
+  });
+
+  it("goes on without lookups when the checkout fails, and says so", async () => {
+    const { engine } = fakeEngine();
+    const made = withLookups({ answer: answer(proven()) }, engine);
+    const failing = async () => {
+      throw new Error("git fetch failed: fatal: could not read Username");
+    };
+    const result = await runReview({ ...made.deps, createCheckout: failing }, REF, search);
+    assert.equal(result.lookups?.status, "unavailable");
+    assert.match(result.lookups?.error ?? "", /could not read Username/);
+    assert.equal(made.requests.length, 1);
+    assert.doesNotMatch(made.requests[0]?.prompt ?? "", /lookups/);
+    assert.equal(result.findings[0]?.severity, "P1");
+    assert.match(formatReview(result, false), /lookups: git grep could not be used, so the review had no lookups: git fetch failed/);
+  });
+
+  it("goes on without lookups when the engine's setup fails, and deletes the checkout", async () => {
+    const { engine } = fakeEngine(undefined, { prepare: async () => { throw new Error("tgrep index failed"); } });
+    const made = withLookups({ answer: answer() }, engine);
+    const result = await runReview(made.deps, REF, search);
+    assert.equal(result.lookups?.status, "unavailable");
+    assert.deepEqual(made.checkout.disposed, ["/fake/dir"]);
+  });
+
+  it("goes on without lookups when Bitbucket does not know the commit", async () => {
+    const { engine } = fakeEngine();
+    const made = withLookups({ answer: answer(), hash: undefined }, engine);
+    const result = await runReview(made.deps, REF, search);
+    assert.equal(result.lookups?.status, "unavailable");
+    assert.match(result.lookups?.error ?? "", /does not know the commit/);
+    assert.equal(made.checkout.requests.length, 0);
+  });
+
+  it("shows the verifier the same results, lets it ask for more, and takes a counter quote from them", async () => {
+    const { engine, asked } = fakeEngine();
+    const counter = { path: "src/login.ts", line: 12, quote: "export const sync = () => start();" };
+    const made = withLookups(
+      {
+        answers: [asks({ grep: "sync()" }), answer(proven({ severity: "P2" }))],
+        verifier: {
+          answers: [
+            asks({ grep: "start(" }),
+            JSON.stringify({ verdicts: [{ id: 1, verdict: "refuted", reason: "sync is only called at login.", counter }] }),
+          ],
+        },
+      },
+      engine,
+    );
+    const result = await runReview(made.deps, REF, search);
+    assert.deepEqual(asked, ["sync()", "start("]);
+    assert.match(made.verifierRequests[0]?.prompt ?? "", /Lookup results \(code of the repository/);
+    assert.match(made.verifierRequests[0]?.prompt ?? "", /src\/login\.ts:12\|/);
+    assert.match(made.verifierRequests[1]?.prompt ?? "", /last turn/);
+    assert.equal(result.findings[0]?.severity, "P3");
+    assert.equal(result.verification?.refuted, 1);
+    assert.deepEqual(result.calls, { reviewer: 2, verifier: 2 });
+    assert.deepEqual(result.lookups?.asked, { reviewer: 1, verifier: 1 });
+  });
+
+  it("names the engine in the footer of a comment only when lookups were answered", async () => {
+    const { engine } = fakeEngine();
+    const used = withLookups({ answers: [asks({ grep: "sync()" }), answer({ severity: "P3", title: "Nit", detail: "" })] }, engine);
+    await runReview(used.deps, REF, { ...search, post: true });
+    assert.match(used.posted[0] ?? "", /looked up with git grep/);
+
+    const unused = withLookups({ answers: [answer({ severity: "P3", title: "Nit", detail: "" })] }, engine);
+    await runReview(unused.deps, REF, { ...search, post: true });
+    assert.doesNotMatch(unused.posted[0] ?? "", /looked up with/);
+  });
+
+  it("measures the time of each agent", async () => {
+    const { engine } = fakeEngine();
+    const result = await runReview(withLookups({ answer: answer() }, engine).deps, REF, search);
+    assert.ok(result.timings.totalMs >= result.timings.reviewerMs);
+    assert.ok(result.timings.reviewerMs >= 0);
+  });
+});
+
 describe("formatReview", () => {
   const finding = (extra: Partial<Finding>): Finding => ({ severity: "P2", title: "x", detail: "", basis: "code", evidence: [], ...extra });
   const base: ReviewResult = {
@@ -389,6 +640,8 @@ describe("formatReview", () => {
     omitted: 0,
     posted: [],
     alreadyPosted: [],
+    calls: { reviewer: 1, verifier: 0 },
+    timings: { reviewerMs: 61_400, verifierMs: 0, totalMs: 62_000 },
   };
 
   it("says what was shown and that there were no findings", () => {

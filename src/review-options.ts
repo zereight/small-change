@@ -1,6 +1,7 @@
 import { parseArgs } from "node:util";
 import { type PullRequestRef, parsePullRequestUrl } from "./pr-url.ts";
 import { UsageError } from "./options.ts";
+import { isSearchId, SEARCH_IDS } from "./review/engines.ts";
 import type { ReviewOptions } from "./review/review.ts";
 
 export const REVIEW_USAGE = `Usage: small-change review <PR URL> [options]
@@ -21,6 +22,11 @@ Options:
   --context-bytes <n>      Show at most n bytes of the changed files' code besides the diff, so that
                            findings can rest on code around the change; 0: the diff only (default: 120000)
   --context-lines <n>      Lines shown around each change in a file too large to show whole (default: 40)
+  --search <engine>        Let the agents ask to see more code of the pull request, which this tool then
+                           finds on a checkout of its commit: git-grep, tgrep, graft, or off
+                           (default: off). git-grep needs only git; tgrep and graft must be installed
+  --max-lookups <n>        The most lookups an agent may ask for in a turn (default: 8)
+  --json                   Print the result as JSON instead of text
   --no-verifier            Do not have the verifier try to refute the P1 and P2 findings, even if one
                            is configured ("small-change model setup --role verifier")
   --timeout <seconds>      Give each agent this long (default: 900)
@@ -39,7 +45,7 @@ Environment:
 
 export type ReviewCommand =
   | { command: "help" }
-  | { command: "review"; ref: PullRequestRef; options: ReviewOptions; config: string | undefined };
+  | { command: "review"; ref: PullRequestRef; options: ReviewOptions; config: string | undefined; json: boolean };
 
 /** Parses the arguments after `review`. Throws {@link UsageError}. */
 export function parseReviewArgs(argv: string[]): ReviewCommand {
@@ -70,13 +76,20 @@ export function parseReviewArgs(argv: string[]): ReviewCommand {
   if (language !== undefined && (language === "" || /[\r\n]/.test(language) || language.length > 40)) {
     throw new UsageError(`Invalid --language "${values.language}": expected a short language name`);
   }
+  const search = values.search ?? "off";
+  if (search !== "off" && !isSearchId(search)) {
+    throw new UsageError(`Invalid --search "${search}": expected ${[...SEARCH_IDS, "off"].join(", ")}`);
+  }
   return {
     command: "review",
     ref,
     config: values.config,
+    json: values.json ?? false,
     options: {
       post: values.post ?? false,
       verifier: values.verifier ?? true,
+      search,
+      maxLookups: positive(values["max-lookups"], "--max-lookups") ?? 8,
       language: language ?? "English",
       maxFindings: positive(values["max-findings"], "--max-findings") ?? 10,
       maxDiffBytes: positive(values["max-diff-bytes"], "--max-diff-bytes") ?? 300_000,
@@ -95,6 +108,9 @@ function parse(argv: string[]) {
     options: {
       post: { type: "boolean" },
       verifier: { type: "boolean" },
+      search: { type: "string" },
+      "max-lookups": { type: "string" },
+      json: { type: "boolean" },
       language: { type: "string" },
       "max-findings": { type: "string" },
       "max-diff-bytes": { type: "string" },

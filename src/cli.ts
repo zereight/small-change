@@ -96,7 +96,7 @@ async function review(argv: string[]): Promise<number> {
     command.ref,
     command.options,
   );
-  console.log(formatReview(result, command.options.post));
+  console.log(command.json ? JSON.stringify(result, null, 2) : formatReview(result, command.options.post));
   return 0;
 }
 

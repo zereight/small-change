@@ -17,6 +17,8 @@ export interface PullRequest {
   author: Person;
   /** The source branch's tip: the commit a review of the diff belongs to. */
   sourceCommit: string;
+  /** The repository the source branch lives in: a fork, when the PR comes from one. Absent when unknown. */
+  sourceRepository?: RepositoryRef;
   /** The destination branch's tip. The exclusion file is read here, never from the PR's own head. */
   destinationCommit: string;
 }
@@ -56,6 +58,8 @@ export interface BitbucketReview extends Bitbucket {
   getDiff(ref: PullRequestRef): Promise<string>;
   /** Posts a general (not inline) comment and returns its id. Needs write access to pull requests. */
   postComment(ref: PullRequestRef, body: string): Promise<number>;
+  /** The full hash of a commit given by a short one, or undefined when the repository has no such commit. */
+  getCommitHash(repository: RepositoryRef, commit: string): Promise<string | undefined>;
 }
 
 export class HttpError extends Error {
@@ -163,7 +167,7 @@ export function createBitbucket(options: BitbucketOptions = {}): BitbucketReview
         title?: string;
         description?: string | null;
         author?: RawPerson;
-        source?: { commit?: { hash?: string } | null };
+        source?: { commit?: { hash?: string } | null; repository?: { full_name?: string } | null };
         destination?: { commit?: { hash?: string } | null };
       }>(pullRequestUrl(ref));
       const destinationCommit = raw.destination?.commit?.hash;
@@ -171,6 +175,7 @@ export function createBitbucket(options: BitbucketOptions = {}): BitbucketReview
       if (destinationCommit === undefined || sourceCommit === undefined) {
         throw new Error(`Bitbucket returned no source or destination commit for pull request ${ref.id}`);
       }
+      const sourceRepository = toRepository(raw.source?.repository?.full_name);
       return {
         id: raw.id,
         title: raw.title ?? "",
@@ -178,6 +183,7 @@ export function createBitbucket(options: BitbucketOptions = {}): BitbucketReview
         author: toPerson(raw.author),
         sourceCommit,
         destinationCommit,
+        ...(sourceRepository === undefined ? {} : { sourceRepository }),
       };
     },
 
@@ -268,6 +274,21 @@ export function createBitbucket(options: BitbucketOptions = {}): BitbucketReview
       return created.id;
     },
 
+    async getCommitHash(repository, commit) {
+      if (!/^[0-9a-f]{7,64}$/.test(commit)) {
+        throw new Error(`Not a commit hash: ${JSON.stringify(commit)}`);
+      }
+      try {
+        const body = await getJson<{ hash?: string }>(`${repositoryUrl(repository)}/commit/${commit}`);
+        return typeof body.hash === "string" && /^[0-9a-f]{40,64}$/.test(body.hash) ? body.hash : undefined;
+      } catch (error) {
+        if (error instanceof HttpError && error.status === 404) {
+          return undefined;
+        }
+        throw error;
+      }
+    },
+
     async getFile(repository, commit, path) {
       try {
         const encoded = path.split("/").map(encodeURIComponent).join("/");
@@ -280,6 +301,14 @@ export function createBitbucket(options: BitbucketOptions = {}): BitbucketReview
       }
     },
   };
+}
+
+/** `workspace/repo` from Bitbucket's `full_name`, when both are plain slugs (they go into URLs). */
+function toRepository(fullName: string | undefined): RepositoryRef | undefined {
+  const [workspace, repo, ...rest] = (typeof fullName === "string" ? fullName : "").split("/");
+  const plain = (slug: string | undefined): slug is string =>
+    slug !== undefined && /^[A-Za-z0-9._-]+$/.test(slug) && slug !== "." && slug !== "..";
+  return rest.length === 0 && plain(workspace) && plain(repo) ? { workspace, repo } : undefined;
 }
 
 function toPerson(raw: RawPerson | undefined): Person {

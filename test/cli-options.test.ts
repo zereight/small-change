@@ -66,15 +66,34 @@ describe("parseReviewArgs", () => {
       command: "review",
       ref: { workspace: "team", repo: "repo", id: 12 },
       config: undefined,
-      options: { post: false, verifier: true, language: "English", maxFindings: 10, maxDiffBytes: 300_000, contextBytes: 120_000, contextLines: 40, timeoutMs: 900_000 },
+      json: false,
+      options: { post: false, verifier: true, search: "off", maxLookups: 8, language: "English", maxFindings: 10, maxDiffBytes: 300_000, contextBytes: 120_000, contextLines: 40, timeoutMs: 900_000 },
     });
   });
 
   it("parses the flags", () => {
     const parsed = parseReviewArgs([URL, "--post", "--language", "Korean", "--max-findings", "3", "--max-diff-bytes", "5000", "--context-bytes", "0", "--context-lines", "10", "--timeout", "60", "--config", "/c"]);
     assert.ok(parsed.command === "review");
-    assert.deepEqual(parsed.options, { post: true, verifier: true, language: "Korean", maxFindings: 3, maxDiffBytes: 5000, contextBytes: 0, contextLines: 10, timeoutMs: 60_000 });
+    assert.deepEqual(parsed.options, { post: true, verifier: true, search: "off", maxLookups: 8, language: "Korean", maxFindings: 3, maxDiffBytes: 5000, contextBytes: 0, contextLines: 10, timeoutMs: 60_000 });
     assert.equal(parsed.config, "/c");
+  });
+
+  it("parses --search, --max-lookups and --json", () => {
+    const parsed = parseReviewArgs([URL, "--search", "tgrep", "--max-lookups", "3", "--json"]);
+    assert.ok(parsed.command === "review");
+    assert.equal(parsed.options.search, "tgrep");
+    assert.equal(parsed.options.maxLookups, 3);
+    assert.equal(parsed.json, true);
+    for (const id of ["git-grep", "graft", "off"]) {
+      const each = parseReviewArgs([URL, "--search", id]);
+      assert.ok(each.command === "review");
+      assert.equal(each.options.search, id);
+    }
+  });
+
+  it("rejects an unknown engine and a bad number of lookups", () => {
+    assert.throws(() => parseReviewArgs([URL, "--search", "ripgrep"]), /Invalid --search "ripgrep": expected git-grep, tgrep, graft, off/);
+    assert.throws(() => parseReviewArgs([URL, "--max-lookups", "0"]), /positive integer/);
   });
 
   it("turns the verifier off with --no-verifier", () => {

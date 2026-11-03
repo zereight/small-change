@@ -12,7 +12,10 @@ export const MIN_QUOTE_CHARS = 10;
  * code of the expanded files. A quote counts only if it is in that text, with runs of whitespace
  * treated as one, so a quote cannot be made up or taken from code that was not shown.
  */
-export function buildQuoteChecker(diffFiles: readonly DiffFile[], contextFiles: readonly ContextFile[]): QuoteChecker {
+export function buildQuoteChecker(
+  diffFiles: readonly DiffFile[],
+  contextFiles: readonly Pick<ContextFile, "path" | "shown">[],
+): QuoteChecker {
   const byPath = new Map<string, string[]>();
   const add = (path: string, text: string) => {
     byPath.set(path, [...(byPath.get(path) ?? []), text]);

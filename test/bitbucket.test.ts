@@ -59,6 +59,62 @@ describe("getPullRequest", () => {
   });
 });
 
+describe("getPullRequest: the source repository", () => {
+  const prWith = (repository: unknown) =>
+    fakeFetch((url) =>
+      url === `${REPO_API}/pullrequests/7`
+        ? json({
+            id: 7,
+            title: "Fix",
+            author: { uuid: "{u}", display_name: "Alice" },
+            source: { commit: { hash: "33c9a36c25ed" }, repository },
+            destination: { commit: { hash: "c1534197bde1" } },
+          })
+        : undefined,
+    );
+
+  it("names the repository the branch lives in, which is another one for a fork", async () => {
+    const pr = await createBitbucket({ fetch: prWith({ full_name: "someone/team-fork" }).fetchImpl }).getPullRequest(REF);
+    assert.deepEqual(pr.sourceRepository, { workspace: "someone", repo: "team-fork" });
+  });
+
+  it("leaves it out when it is missing or is not two plain slugs, since it goes into a URL", async () => {
+    for (const repository of [undefined, null, {}, { full_name: "one" }, { full_name: "a/b/c" }, { full_name: "../x" }, { full_name: "a/.." }, { full_name: "a/b c" }, { full_name: 5 }]) {
+      const pr = await createBitbucket({ fetch: prWith(repository).fetchImpl }).getPullRequest(REF);
+      assert.equal("sourceRepository" in pr, false, JSON.stringify(repository));
+    }
+  });
+});
+
+describe("getCommitHash", () => {
+  const FULL = "33c9a36c25ed".padEnd(40, "0");
+
+  it("gives the full hash for a short one", async () => {
+    const { fetchImpl, calls } = fakeFetch((url) => (url === `${REPO_API}/commit/33c9a36c25ed` ? json({ hash: FULL }) : undefined));
+    assert.equal(await createBitbucket({ fetch: fetchImpl }).getCommitHash({ workspace: "team", repo: "repo" }, "33c9a36c25ed"), FULL);
+    assert.equal(calls.length, 1);
+  });
+
+  it("is undefined for a commit the repository does not have, and for an answer that is not a full hash", async () => {
+    const missing = fakeFetch(() => new Response("not found", { status: 404 }));
+    assert.equal(await createBitbucket({ fetch: missing.fetchImpl }).getCommitHash({ workspace: "team", repo: "repo" }, "33c9a36c25ed"), undefined);
+    for (const body of [{}, { hash: "33c9a36c25ed" }, { hash: 5 }]) {
+      const odd = fakeFetch(() => json(body));
+      assert.equal(await createBitbucket({ fetch: odd.fetchImpl }).getCommitHash({ workspace: "team", repo: "repo" }, "33c9a36c25ed"), undefined);
+    }
+  });
+
+  it("refuses anything but hex before making a request, and passes other errors on", async () => {
+    const { fetchImpl, calls } = fakeFetch(() => new Response("boom", { status: 500 }));
+    const bitbucket = createBitbucket({ fetch: fetchImpl });
+    for (const commit of ["", "abc", "../refs", "33c9a36c25ed/../x", "G".repeat(12), "33C9A36C25ED"]) {
+      await assert.rejects(bitbucket.getCommitHash({ workspace: "team", repo: "repo" }, commit), /Not a commit hash/);
+    }
+    assert.equal(calls.length, 0);
+    await assert.rejects(bitbucket.getCommitHash({ workspace: "team", repo: "repo" }, "33c9a36c25ed"), HttpError);
+  });
+});
+
 describe("getFileChanges", () => {
   it("follows next links and maps added, removed and excluded files", async () => {
     const second = `${REPO_API}/pullrequests/7/diffstat?pagelen=100&page=2`;

@@ -189,7 +189,8 @@ small-change review https://bitbucket.org/team/platform/pull-requests/128 --post
 Posting needs `BITBUCKET_TOKEN` with write access to pull requests. A finding is skipped when a
 comment on the PR already opens with the same line, so running the review twice does not post
 twice. Other flags: `--language`, `--max-findings`, `--max-diff-bytes`, `--context-bytes`,
-`--context-lines`, `--no-verifier`, `--timeout`.
+`--context-lines`, `--no-verifier`, `--timeout`, `--json` (print the result as JSON), and
+`--search`, `--max-lookups` (see "Looking up more code").
 
 ### What a P1 or P2 needs
 
@@ -257,6 +258,7 @@ diff only). Not shown, and listed with the reason in the prompt and in the outpu
 binary files, new files (the diff already has all of them), lock files, generated and minified
 files, a file that cannot be read, and what does not fit in the size limit. The reviewer still has
 no tools; only the files of the PR itself are read, and they are fenced as data like the diff.
+(`--search` lets it ask for more; the agent still has no tools, see the next section.)
 
 What keeps an untrusted PR from steering the review:
 
@@ -299,6 +301,116 @@ Limits observed on a real machine:
   is, whatever the budget.
 - `--post` has not been run against a real PR.
 
+## Looking up more code: `--search`
+
+A finding often rests on code the diff and the changed files do not show: who else calls a
+function, whether the same import is used elsewhere, what a definition says. Without `--search`
+(the default) the agent can only guess. With it, the agent may answer its first turn with
+`{"lookups":[...]}` instead of findings. This tool runs the lookups on a checkout of the PR's source
+commit, adds the answers to the material and gives the agent one more turn, in which it must answer.
+The verifier gets the same offer. A quote copied from a lookup result counts as proof like a quote
+from the diff, so a refutation can cite a file that the PR does not touch.
+
+```sh
+small-change review <pr-url> --search git-grep        # needs only git
+small-change review <pr-url> --search tgrep --max-lookups 12
+```
+
+| Kind | Asks for | Engines |
+| --- | --- | --- |
+| `grep` | lines containing a text, or matching a regular expression; optional `glob` (`*.kt`, `src/**/*.ts`) and `ignoreCase` | all |
+| `file` | lines of one file (at most 200 per request) | all |
+| `callers` | the symbols that call a function, with the lines of the calls | `graft` |
+| `skeleton` | the signatures in a file, without bodies | `graft` |
+
+Each agent asks for at most `--max-lookups` (default 8) per turn. One answer shows at most 40 hits
+or lines and 12000 characters, and all answers of a review together at most 60000; what is cut is
+counted in the output. Each agent that asks costs one more model run.
+
+How it stays safe, as the PR is untrusted:
+
+- The agent has no tools. A lookup is JSON that this tool validates (pattern of 3 to 200
+  characters without line breaks, a glob that cannot leave the repository, a path without `..`, a
+  symbol name that is an identifier) and then runs itself. Nothing the agent writes becomes a
+  command line.
+- The checkout is `git init` and `git fetch --depth 1` of one full commit hash into a temporary
+  directory: no history, no tags, no submodules. Git runs with no system or user configuration, with
+  hooks switched off, no prompts and no credential helper. Links are checked out as plain files, and
+  files are read through `git cat-file` at the commit, so a link cannot lead out of the directory.
+- The token goes to the fetch only, as a Basic `x-token-auth` header in git's environment
+  configuration, never in an argument. Bitbucket accepts a Bearer token for its API but not for git
+  over HTTPS. The search programs get `PATH` and nothing else; the agents get no `BITBUCKET_*`.
+- The checkout is deleted when the review ends, also when it fails. If it cannot be made (a private
+  fork, no network, a broken index), the review goes on without lookups and the output says why.
+- Lookup results are code written by the PR's author. They sit in the material like the diff and
+  are fenced as data.
+
+### The engines
+
+| Engine | Needs | Searches |
+| --- | --- | --- |
+| `git-grep` | git | the tracked files of the commit, read from git's object store; no checkout of files |
+| `tgrep` | [microsoft/tgrep](https://github.com/microsoft/tgrep) on `PATH` (or `SMALL_CHANGE_TGREP`) | an index built over a checkout |
+| `graft` | the `@nanonets/graft` npm package on `PATH` (or `SMALL_CHANGE_GRAFT`) | a symbol graph built with tree-sitter; adds `callers` and `skeleton` |
+
+Measured on one machine, on a checkout of about 4,700 tracked files (TypeScript, Kotlin, Swift,
+C++), cloned from a local path so that no network time is in it. Times are per request.
+
+| | checkout | setup | `grep` | `file` | `callers` / `skeleton` |
+| --- | --- | --- | --- | --- | --- |
+| `git-grep` | 0.6 s | none | 65 to 115 ms | 26 ms | not offered |
+| `tgrep` | 1.1 s | 0.3 s (index) | 7 to 25 ms | 24 ms | not offered |
+| `graft` | 1.0 s | 10 s (cold build) | 930 to 1060 ms | 27 ms | 250 ms / 230 ms |
+
+A fetch from Bitbucket added a few seconds to every engine (6 to 16 s for the checkout in the runs
+below, most of which ran four at a time). A model run is minutes, so none of these times decides the
+choice at this repository size. `tgrep` may matter on a much larger repository; that was not
+measured.
+
+What the engines return for the same request:
+
+- `git-grep` and `tgrep` returned the same hits (path and line) on all four `grep` queries tried
+  (4, 24, 15 and 857 hits). `tgrep` needs its index built with `--hidden`, because by default it
+  leaves out dot files such as `.eslintrc.js` that are tracked; this tool does that. Passing
+  `--hidden` at query time instead makes a query about 30 times slower, so it is not done.
+- `graft` returned the same hits on the three queries that matched TypeScript, TSX and Kotlin
+  files, and capped one query at 300 hits where git found 857. In `.swift` files it matched two
+  words in full and missed a third entirely; why was not investigated. **It returned no hit in files it
+  does not parse**: `.gradle`, `.xml`, `.json`, `.yml`, `.plist`, `.pbxproj`, `.sh`, `.m`/`.mm`, lock
+  files and files without an extension, where `git-grep` and `tgrep` found them (for example 0 hits
+  of a pipeline step name in the pipelines YAML file, where git grep found 6). A review that needs
+  to look at build or manifest files gets nothing from `graft grep`. It is the only engine with
+  `callers` and `skeleton`.
+- `graft` is a third-party package that sends anonymous usage events unless told not to, and has
+  an install script. This tool runs it with `DO_NOT_TRACK=1` and a scratch `HOME`; that it honors
+  the variable was read in its source, not observed on the network. In these tests it ran under a
+  profile that denies all network access.
+
+What the lookups changed in the review, on one pull request that touches TypeScript, Kotlin and
+Swift files (3 runs per engine; the reviewer Muse `muse-spark-1.3` at budget `large`, the verifier
+Claude `opus` at `medium`):
+
+| | final P1 or P2 per run | P1/P2 lowered by the verifier | requests per run | total time per run |
+| --- | --- | --- | --- | --- |
+| `off` | 0, 0, 1 | 3 | 0 | 1.8 to 7.7 min |
+| `git-grep` | 0, 1, 0 | 2 | 8 to 14 | 5.8 to 8.7 min |
+| `tgrep` | 0, 0, 0 | 7 | 6 to 8 | 2.8 to 7.8 min |
+| `graft` | 0, 0, 0 | 3 | 8 to 13 | 6.8 to 8.2 min |
+
+(Most runs ran four at a time, so the model's own latency, which varies a lot between runs, is
+mixed into the times.)
+
+Read it for what it is: three runs per engine do not separate the engines. A P1 or P2 survived in
+one run of `off` and one of `git-grep` and in none of `tgrep` and `graft`, which is within the noise
+between two runs of the same setup. What the runs do show is the mechanism. In two of the three
+`git-grep` runs the reviewer raised a P1 that a Kotlin library module imports a class of the app
+module, which would not build. The verifier searched the repository, found three existing files of
+the same library module with the same import, quoted one of them, and the finding went down to P3.
+Without lookups the verifier has only the diff and cannot quote a file the PR does not touch. In
+those runs the reviewer itself did not search for that import; the verifier did. On a second PR
+that has no findings with `off`, none of the four engines produced a P1 or P2 (`git-grep` added one
+question).
+
 ## Choices to check
 
 The rules leave room for interpretation. These are the choices made here; each is easy to change.
@@ -314,6 +426,10 @@ The rules leave room for interpretation. These are the choices made here; each i
   a PR counts for every affected service it touches. It stops when each service has enough, or after
   `--history-limit` PRs (default 100), in which case the check fails. The PRs are read one at a time,
   at about a second each, so 100 PRs take a couple of minutes.
+- **`--search` is off by default.** It needs a clone over the network, a search program and a
+  second model run per agent that asks. `git-grep` is the engine to start with: no install, and the
+  same hits as `tgrep` on every query tried. `graft` is the one to choose only for `callers` and
+  `skeleton`, knowing that its `grep` does not see config and build files.
 - **Only unresolved findings count.** Without `--bot`, a comment from anyone that matches the
   pattern is a finding; `--bot` narrows that to the named review bots (name, nickname or UUID).
 - **A renamed file counts on both sides**: its old and new path are both checked against the
