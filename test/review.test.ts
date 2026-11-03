@@ -8,6 +8,7 @@ import { formatReview, type ReviewOptions, type ReviewResult, runReview } from "
 
 const REF = { workspace: "team", repo: "repo", id: 5 };
 const CONFIG: ModelConfig = { version: 1, provider: "claude", model: "opus", budget: "large", effort: "xhigh" };
+const VERIFIER = { provider: "muse" as const, model: "muse-spark-1.3", budget: "medium" as const, effort: "high" as const };
 const OPTIONS: ReviewOptions = {
   maxFindings: 10,
   maxDiffBytes: 5000,
@@ -15,6 +16,7 @@ const OPTIONS: ReviewOptions = {
   contextLines: 40,
   language: "English",
   post: true,
+  verifier: true,
   timeoutMs: 1000,
 };
 const NO_EXEC: Exec = async () => assert.fail("exec must not be called directly");
@@ -37,6 +39,8 @@ interface World {
   answer?: string;
   failPostAt?: number;
   files?: Record<string, string | Error>;
+  /** A second model; its answer, or the error it fails with, or that it is not installed. */
+  verifier?: { answer?: string; error?: string; installed?: boolean };
 }
 
 function setup(world: World) {
@@ -95,8 +99,24 @@ function setup(world: World) {
       return world.answer ?? '{"findings":[]}';
     },
   };
+  const verifierRequests: RunRequest[] = [];
+  const second: Provider = {
+    ...provider,
+    id: "muse",
+    label: "Muse",
+    binary: "muse",
+    isInstalled: async () => world.verifier?.installed ?? true,
+    async run(_exec, request) {
+      verifierRequests.push(request);
+      if (world.verifier?.error !== undefined) {
+        throw new Error(world.verifier.error);
+      }
+      return world.verifier?.answer ?? '{"verdicts":[]}';
+    },
+  };
   const env = { PATH: "/bin", BITBUCKET_TOKEN: "secret-token", BITBUCKET_API_TOKEN: "secret-2" };
-  return { bitbucket, provider, posted, requests, reads, deps: { bitbucket, provider, exec: NO_EXEC, config: CONFIG, env } };
+  const verifier = world.verifier === undefined ? {} : { verifier: { provider: second, config: VERIFIER } };
+  return { bitbucket, provider, posted, requests, verifierRequests, reads, deps: { bitbucket, provider, exec: NO_EXEC, config: CONFIG, ...verifier, env } };
 }
 
 const answer = (...findings: object[]) => JSON.stringify({ findings });
@@ -233,6 +253,131 @@ describe("runReview", () => {
   });
 });
 
+describe("runReview with a verifier", () => {
+  const refute = (id: number, extra: object = {}) => ({
+    id,
+    verdict: "refuted",
+    reason: "the comment says it is deliberate.",
+    counter: { path: "src/x.ts", line: 3, quote: "const b = a - 1;" },
+    ...extra,
+  });
+  const verdicts = (...entries: object[]) => JSON.stringify({ verdicts: entries });
+
+  it("is not run without a configured verifier, or with --no-verifier", async () => {
+    const none = setup({ answer: answer(proven()) });
+    const result = await runReview(none.deps, REF, OPTIONS);
+    assert.equal(result.verification, undefined);
+    assert.equal(result.findings[0]?.severity, "P1");
+
+    const off = setup({ answer: answer(proven()), verifier: { error: "must not run" } });
+    const skipped = await runReview(off.deps, REF, { ...OPTIONS, verifier: false });
+    assert.equal(skipped.verification, undefined);
+    assert.equal(off.verifierRequests.length, 0);
+  });
+
+  it("is not asked about findings that are not P1 or P2, and not run when there are none", async () => {
+    const world = setup({ answer: answer({ severity: "P3", title: "Nit", detail: "" }), verifier: { error: "must not run" } });
+    const result = await runReview(world.deps, REF, OPTIONS);
+    assert.equal(world.verifierRequests.length, 0);
+    assert.equal(result.verification, undefined);
+    assert.equal(result.findings.length, 1);
+  });
+
+  it("shows the second model the same code, the candidates only, in an empty directory with no Bitbucket variable", async () => {
+    const world = setup({
+      answer: answer(proven(), proven({ severity: "P2", title: "Second", line: 2 }), { severity: "P3", title: "Nit", detail: "" }),
+      verifier: { answer: verdicts({ id: 1, verdict: "upheld" }, { id: 2, verdict: "upheld" }) },
+    });
+    await runReview(world.deps, REF, OPTIONS);
+    const [request] = world.verifierRequests;
+    assert.ok(request?.prompt.includes("3| const b = a - 1;") && request.prompt.includes("diff --git a/src/x.ts b/src/x.ts"));
+    assert.ok(request?.prompt.includes("[1] P1") && request.prompt.includes("[2] P2") && !request.prompt.includes("Nit"));
+    assert.equal(request?.model, "muse-spark-1.3");
+    assert.equal(request?.effort, "high");
+    assert.equal(request?.timeoutMs, 1000);
+    assert.deepEqual(request?.env, { PATH: "/bin" });
+    assert.match(request?.workdir ?? "", /small-change-review-/);
+    assert.notEqual(request?.workdir, world.requests[0]?.workdir);
+  });
+
+  it("posts a refuted P2 as a P3 with the counter quote, and names both models in the footer", async () => {
+    const world = setup({
+      answer: answer(proven({ severity: "P2" })),
+      verifier: { answer: verdicts(refute(1)) },
+    });
+    const result = await runReview(world.deps, REF, OPTIONS);
+    assert.equal(result.findings[0]?.severity, "P3");
+    assert.deepEqual(result.verification, { by: "muse/muse-spark-1.3", checked: 1, refuted: 1, undecided: 0 });
+    assert.equal(world.posted[0]?.split("\n")[0], "**P3** Bug");
+    assert.match(world.posted[0] ?? "", /_Graded P3, not P2: the second reviewer \(muse\/muse-spark-1\.3\) refuted it: the comment says it is deliberate\._/);
+    assert.match(world.posted[0] ?? "", /Against it:\n- `src\/x\.ts:3` `const b = a - 1;`/);
+    assert.match(world.posted[0] ?? "", /small-change review · claude\/opus · checked by muse\/muse-spark-1\.3 · commit abc123def456/);
+    assert.ok(!/\bP[12]\b/.test(world.posted[0]?.split("\n")[0] ?? ""));
+  });
+
+  it("keeps what is upheld, unclear or unanswered, and counts the undecided", async () => {
+    const world = setup({
+      answer: answer(proven({ title: "a" }), proven({ title: "b", severity: "P2", line: 2 }), proven({ title: "c", severity: "P2", line: 4 })),
+      verifier: { answer: verdicts({ id: 1, verdict: "upheld" }, { id: 2, verdict: "unclear", reason: "cannot tell" }) },
+    });
+    const result = await runReview(world.deps, REF, OPTIONS);
+    assert.deepEqual(result.findings.map((f) => f.severity), ["P1", "P2", "P2"]);
+    assert.deepEqual(result.verification, { by: "muse/muse-spark-1.3", checked: 3, refuted: 0, undecided: 2 });
+  });
+
+  it("does not take a refutation whose quote is not in the code shown", async () => {
+    const world = setup({
+      answer: answer(proven()),
+      verifier: { answer: verdicts(refute(1, { counter: { path: "src/x.ts", quote: "if (handledElsewhere(value)) return;" } })) },
+    });
+    const result = await runReview(world.deps, REF, OPTIONS);
+    assert.equal(result.findings[0]?.severity, "P1");
+    assert.equal(result.verification?.refuted, 0);
+    assert.equal(result.verification?.undecided, 1);
+  });
+
+  it("accepts a counter quote from the expanded code that is not in the diff", async () => {
+    const world = setup({
+      answer: answer(proven()),
+      verifier: { answer: verdicts(refute(1, { counter: { path: "src/x.ts", line: 1, quote: "const header = 0;" } })) },
+    });
+    const result = await runReview(world.deps, REF, OPTIONS);
+    assert.equal(result.findings[0]?.severity, "P3");
+  });
+
+  it("puts the findings in order again after lowering one", async () => {
+    const world = setup({
+      answer: answer(proven({ title: "first" }), proven({ title: "second", severity: "P2", line: 2 })),
+      verifier: { answer: verdicts(refute(1)) },
+    });
+    const result = await runReview(world.deps, REF, OPTIONS);
+    assert.deepEqual(result.findings.map((f) => `${f.severity} ${f.title}`), ["P2 second", "P3 first"]);
+  });
+
+  it("stops without posting anything when the verifier fails, is not JSON, or has no verdicts", async () => {
+    for (const verifier of [{ error: "timed out" }, { answer: "looks fine" }, { answer: '{"findings":[]}' }]) {
+      const world = setup({ answer: answer(proven(), { severity: "P3", title: "Nit", detail: "" }), verifier });
+      await assert.rejects(
+        runReview(world.deps, REF, OPTIONS),
+        /The verifier \(muse\/muse-spark-1\.3\) failed, so nothing was posted: /,
+      );
+      assert.deepEqual(world.posted, []);
+    }
+  });
+
+  it("stops before reading anything when the verifier's CLI is missing", async () => {
+    const world = setup({ answer: answer(proven()), verifier: { installed: false } });
+    await assert.rejects(runReview(world.deps, REF, OPTIONS), /The verifier's `muse` was not found on PATH.*--no-verifier/);
+    assert.equal(world.requests.length, 0);
+    assert.deepEqual(world.reads, []);
+  });
+
+  it("does not check the verifier's CLI when --no-verifier is given", async () => {
+    const world = setup({ answer: answer(), verifier: { installed: false } });
+    await runReview(world.deps, REF, { ...OPTIONS, verifier: false });
+  });
+});
+
 describe("formatReview", () => {
   const finding = (extra: Partial<Finding>): Finding => ({ severity: "P2", title: "x", detail: "", basis: "code", evidence: [], ...extra });
   const base: ReviewResult = {
@@ -274,6 +419,30 @@ describe("formatReview", () => {
     assert.match(text, /3 finding\(s\): 1 P1, 1 P3, 1 ASK\./);
     assert.match(text, /1 of them were graded lower than the reviewer first said/);
     assert.match(text, /Not posted\. Run again with --post/);
+  });
+
+  it("says what the verifier did, and shows the quote against a refuted finding", () => {
+    const refuted: Finding = {
+      ...finding({ severity: "P3", title: "Was a P2" }),
+      lowered: { from: "P2", reason: "the second reviewer (muse/m) refuted it: it is deliberate" },
+      counter: { path: "a.ts", line: 4, quote: "// sent again at the next login" },
+    };
+    const text = formatReview(
+      { ...base, findings: [refuted], verification: { by: "muse/m", checked: 3, refuted: 1, undecided: 1 } },
+      false,
+    );
+    assert.match(text, /checked by muse\/m: 3 P1\/P2 checked, 1 refuted, 1 not decided/);
+    assert.match(text, /lowered from P2: the second reviewer \(muse\/m\) refuted it: it is deliberate/);
+    assert.match(text, /against it: a\.ts:4 \/\/ sent again at the next login/);
+    assert.doesNotMatch(text, /second reviewer:/);
+    const kept = formatReview(
+      { ...base, findings: [finding({ severity: "P1", opinion: { verdict: "unclear", reason: "depends on files not shown" } }), finding({ opinion: { verdict: "upheld" } })], verification: { by: "muse/m", checked: 2, refuted: 0, undecided: 1 } },
+      false,
+    );
+    assert.match(kept, /second reviewer: unclear: depends on files not shown/);
+    assert.match(kept, /second reviewer: upheld\n/);
+    assert.match(text, /graded lower than the reviewer first said, because they were not proven or were refuted/);
+    assert.doesNotMatch(formatReview(base, false), /checked by/);
   });
 
   it("reports posted, skipped, omitted and dropped counts", () => {

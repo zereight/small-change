@@ -225,6 +225,80 @@ describe("model setup interactively", () => {
   });
 });
 
+describe("model setup for the verifier", () => {
+  const REVIEWER = { version: 1 as const, provider: "claude" as const, model: "opus", budget: "large" as const, effort: "xhigh" as const };
+  const MUSE = { provider: "muse" as const, model: "muse-spark-1.3", budget: "medium" as const, effort: "high" as const };
+
+  it("needs the reviewer to be chosen first, and writes nothing", async () => {
+    await assert.rejects(run({ role: "verifier", provider: "muse", model: "muse-spark-1.3", budget: "medium", yes: true }, undefined), /Choose the reviewer first/);
+    await assert.rejects(stat(file), /ENOENT/);
+  });
+
+  it("saves the verifier next to the reviewer and probes the verifier's model", async () => {
+    await saveConfig(file, REVIEWER);
+    const provs = providers();
+    const { config, text } = await run({ role: "verifier", provider: "muse", model: "muse-spark-1.3", budget: "medium", yes: true }, undefined, provs);
+    assert.deepEqual(config, { ...REVIEWER, verifier: MUSE });
+    assert.deepEqual(JSON.parse(await readFile(file, "utf8")), config);
+    assert.equal(provs.muse.probes.length, 1);
+    assert.equal(provs.muse.probes[0]?.model, "muse-spark-1.3");
+    assert.equal(provs.claude.probes.length, 0);
+    assert.match(text, /Role      verifier/);
+  });
+
+  it("starts from the saved verifier, not from the reviewer", async () => {
+    await saveConfig(file, { ...REVIEWER, verifier: MUSE });
+    // No flags and no terminal: every choice comes from what the verifier had saved.
+    const same = await run({ role: "verifier", yes: true }, undefined);
+    assert.deepEqual(same.config, { ...REVIEWER, verifier: MUSE });
+    assert.match(same.text, /Current verifier: muse \/ muse-spark-1\.3/);
+    // One flag changes one choice and keeps the others.
+    const cheaper = await run({ role: "verifier", budget: "small", yes: true }, undefined);
+    assert.equal(cheaper.config.verifier?.model, "muse-spark-1.3");
+    assert.equal(cheaper.config.verifier?.budget, "small");
+    assert.equal(cheaper.config.provider, "claude");
+  });
+
+  it("leaves the verifier alone when the reviewer is chosen again", async () => {
+    await saveConfig(file, { ...REVIEWER, verifier: MUSE });
+    const { config } = await run({ provider: "claude", model: "sonnet", budget: "small", yes: true }, undefined);
+    assert.deepEqual(config, { version: 1, provider: "claude", model: "sonnet", budget: "small", effort: "medium", verifier: MUSE });
+  });
+
+  it("does not save a verifier the account rejects, and keeps the old config", async () => {
+    await saveConfig(file, REVIEWER);
+    const provs = providers({ muse: fake("muse", { reject: "model `x` does not exist or you lack access" }) });
+    await assert.rejects(
+      run({ role: "verifier", provider: "muse", model: "muse-spark-1.3", budget: "medium", yes: true }, undefined, provs),
+      /did not accept muse-spark-1\.3.*Nothing was saved/,
+    );
+    assert.deepEqual(JSON.parse(await readFile(file, "utf8")), REVIEWER);
+  });
+
+  it("notes when the verifier is the reviewer's own model", async () => {
+    await saveConfig(file, REVIEWER);
+    const { text } = await run({ role: "verifier", provider: "claude", model: "opus", budget: "large", yes: true }, undefined);
+    assert.match(text, /Note: this is the reviewer's own model/);
+    const other = await run({ role: "verifier", provider: "claude", model: "haiku", budget: "large", yes: true }, undefined);
+    assert.doesNotMatch(other.text, /reviewer's own model/);
+  });
+
+  it("removes the verifier and keeps the reviewer", async () => {
+    await saveConfig(file, { ...REVIEWER, verifier: MUSE });
+    const { config, text } = await run({ role: "verifier", remove: true }, undefined);
+    assert.deepEqual(config, REVIEWER);
+    assert.deepEqual(JSON.parse(await readFile(file, "utf8")), REVIEWER);
+    assert.match(text, /Removed the verifier/);
+  });
+
+  it("says so when there is no verifier to remove, and refuses --remove for the reviewer", async () => {
+    await saveConfig(file, REVIEWER);
+    const { text } = await run({ role: "verifier", remove: true }, undefined);
+    assert.match(text, /No verifier is set/);
+    await assert.rejects(run({ remove: true }, undefined), /--remove applies to the verifier only/);
+  });
+});
+
 describe("describeConfig", () => {
   it("points to the setup when nothing is saved", async () => {
     assert.match(await describeConfig(file), /No model is configured\. Run `small-change model setup`/);
@@ -233,5 +307,12 @@ describe("describeConfig", () => {
   it("describes the saved choice", async () => {
     await saveConfig(file, { version: 1, provider: "codex", model: "gpt-5.2", budget: "large", effort: "xhigh" });
     assert.match(await describeConfig(file), /codex \/ gpt-5\.2 \(budget large, effort xhigh\)/);
+  });
+
+  it("describes the verifier, or says there is none", async () => {
+    await saveConfig(file, { version: 1, provider: "codex", model: "gpt-5.2", budget: "large", effort: "xhigh" });
+    assert.match(await describeConfig(file), /verifier: none \(run `small-change model setup --role verifier` to add one\)/);
+    await saveConfig(file, { version: 1, provider: "codex", model: "gpt-5.2", budget: "large", effort: "xhigh", verifier: { provider: "muse", model: "muse-spark-1.3", budget: "medium", effort: "high" } });
+    assert.match(await describeConfig(file), /verifier: muse \/ muse-spark-1\.3 \(budget medium, effort high\)/);
   });
 });

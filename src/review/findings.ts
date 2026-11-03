@@ -35,8 +35,12 @@ export interface Finding {
   evidence: Quote[];
   /** For `event`: the quote that shows the event happening. */
   firing?: Quote;
-  /** Set when the grade was lowered because the finding was not proven. */
+  /** Set when the grade was lowered: the finding was not proven, or the verifier refuted it. */
   lowered?: { from: Severity; reason: string };
+  /** Set when the verifier refuted the finding: the quote it relied on. */
+  counter?: Quote;
+  /** What the verifier said about a P1 or P2, when one ran. `unclear` includes no answer at all. */
+  opinion?: { verdict: "upheld" | "refuted" | "unclear"; reason?: string };
 }
 
 export interface ParsedFindings {
@@ -154,7 +158,8 @@ function missingProof(
   return undefined;
 }
 
-function extractJson(answer: string): unknown {
+/** The JSON in a model's answer: the whole text, a fenced block, or the outermost braces. */
+export function extractJson(answer: string): unknown {
   const trimmed = answer.trim();
   const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(trimmed)?.[1];
   const braces = trimmed.slice(trimmed.indexOf("{"), trimmed.lastIndexOf("}") + 1);
@@ -214,7 +219,7 @@ function toFinding(entry: unknown): Finding | undefined {
 }
 
 /** A quote is an object with a `quote`, or a bare string standing for a quote in the finding's file. */
-function toQuote(value: unknown, fallbackPath: string | undefined): Quote | undefined {
+export function toQuote(value: unknown, fallbackPath: string | undefined): Quote | undefined {
   if (typeof value === "string") {
     return value.trim() === "" ? undefined : { ...(fallbackPath === undefined ? {} : { path: fallbackPath }), quote: clip(value, MAX_QUOTE) };
   }
@@ -233,6 +238,6 @@ function toQuote(value: unknown, fallbackPath: string | undefined): Quote | unde
   };
 }
 
-function clip(text: string, max: number): string {
+export function clip(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }

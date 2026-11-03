@@ -5,15 +5,31 @@ import { type Budget, isBudget, isEffort } from "./llm/budget.ts";
 import { isProviderId } from "./llm/providers.ts";
 import type { Effort, ProviderId } from "./llm/types.ts";
 
-/** Which agent CLI, model and reasoning budget the review runs on. */
-export interface ModelConfig {
-  version: 1;
+/** Which agent CLI, model and reasoning budget one role runs on. */
+export interface ModelChoice {
   provider: ProviderId;
   /** A model id, or `default` for the CLI's own default. */
   model: string;
   budget: Budget;
   /** The effort passed to the CLI. Absent when the model slug carries it (Cursor). */
   effort?: Effort;
+}
+
+/** The roles a model can be chosen for: the one that reviews, and the one that tries to refute it. */
+export const ROLES = ["reviewer", "verifier"] as const;
+export type Role = (typeof ROLES)[number];
+
+export function isRole(value: string): value is Role {
+  return (ROLES as readonly string[]).includes(value);
+}
+
+/**
+ * The saved choice. The top-level fields are the reviewer; `verifier`, when present, is a second
+ * model that tries to refute each P1 and P2 the reviewer reports.
+ */
+export interface ModelConfig extends ModelChoice {
+  version: 1;
+  verifier?: ModelChoice;
 }
 
 export class ConfigError extends Error {
@@ -75,10 +91,26 @@ function validate(raw: unknown): ModelConfig | string {
   if (typeof raw !== "object" || raw === null) {
     return "expected a JSON object";
   }
-  const { version, provider, model, budget, effort } = raw as Record<string, unknown>;
+  const { version, verifier } = raw as Record<string, unknown>;
   if (version !== 1) {
     return `unsupported version ${JSON.stringify(version)}`;
   }
+  const reviewer = validateChoice(raw);
+  if (typeof reviewer === "string") {
+    return reviewer;
+  }
+  if (verifier === undefined) {
+    return { version, ...reviewer };
+  }
+  const second = validateChoice(verifier);
+  return typeof second === "string" ? `verifier: ${second}` : { version, ...reviewer, verifier: second };
+}
+
+function validateChoice(raw: unknown): ModelChoice | string {
+  if (typeof raw !== "object" || raw === null) {
+    return "expected a JSON object";
+  }
+  const { provider, model, budget, effort } = raw as Record<string, unknown>;
   if (typeof provider !== "string" || !isProviderId(provider)) {
     return `unknown provider ${JSON.stringify(provider)}`;
   }
@@ -91,5 +123,5 @@ function validate(raw: unknown): ModelConfig | string {
   if (effort !== undefined && (typeof effort !== "string" || !isEffort(effort))) {
     return `unknown effort ${JSON.stringify(effort)}`;
   }
-  return { version, provider, model, budget, ...(effort === undefined ? {} : { effort }) };
+  return { provider, model, budget, ...(effort === undefined ? {} : { effort }) };
 }

@@ -14,7 +14,7 @@ import {
 import { agentEnv } from "./llm/exec.ts";
 import { PROVIDER_IDS, PROVIDERS } from "./llm/providers.ts";
 import { DEFAULT_MODEL, type Effort, type Exec, type ModelInfo, type Provider, type ProviderId } from "./llm/types.ts";
-import { ConfigError, isModelId, loadConfig, type ModelConfig, saveConfig } from "./model-config.ts";
+import { ConfigError, isModelId, loadConfig, type ModelChoice, type ModelConfig, type Role, saveConfig } from "./model-config.ts";
 
 export interface SetupIO {
   input: Readable;
@@ -27,6 +27,10 @@ export interface SetupFlags {
   provider?: ProviderId | undefined;
   model?: string | undefined;
   budget?: Budget | undefined;
+  /** Which model is being chosen; the reviewer when absent. */
+  role?: Role | undefined;
+  /** For the verifier: delete it from the config instead of choosing one. */
+  remove?: boolean | undefined;
   /** Save without asking to confirm. */
   yes: boolean;
   /** Check the choice with a one-word request before saving. */
@@ -49,6 +53,8 @@ const MAX_ATTEMPTS = 5;
 
 /**
  * Chooses which agent CLI, model and reasoning budget the review runs on, and saves the choice.
+ * The choice is for the reviewer, or, with `role: "verifier"`, for the second model that tries to
+ * refute the reviewer's P1 and P2 findings; each role is saved without touching the other.
  *
  * 1. Detect the agent CLIs on PATH and the models the account can use.
  * 2. Start from the saved config, if there is one.
@@ -64,6 +70,35 @@ export async function runModelSetup(deps: SetupDeps, flags: SetupFlags): Promise
   const out = (line = "") => deps.io.output.write(`${line}\n`);
   const prompter = createPrompter(deps.io.input, deps.io.output);
   try {
+    const role = flags.role ?? "reviewer";
+    let saved: ModelConfig | undefined;
+    try {
+      saved = await loadConfig(deps.configFile);
+    } catch (error) {
+      if (!(error instanceof ConfigError)) {
+        throw error;
+      }
+      out(`Ignoring the current config: ${error.message}`);
+    }
+    if (role === "verifier" && saved === undefined) {
+      throw new Error("Choose the reviewer first: run `small-change model setup` without --role, then add the verifier");
+    }
+    if (flags.remove) {
+      if (role !== "verifier" || saved === undefined) {
+        throw new Error("--remove applies to the verifier only; pass --role verifier");
+      }
+      if (saved.verifier === undefined) {
+        out("No verifier is set; nothing to remove.");
+        return saved;
+      }
+      const { verifier: _removed, ...reviewerOnly } = saved;
+      await saveConfig(deps.configFile, reviewerOnly);
+      out(`Removed the verifier from ${deps.configFile}`);
+      return reviewerOnly;
+    }
+    // What this role had saved before: the starting point of each choice.
+    const current: ModelChoice | undefined = role === "verifier" ? saved?.verifier : saved;
+
     out("Looking for agent CLIs...");
     const installed = new Map<ProviderId, boolean>(
       await Promise.all(
@@ -75,17 +110,8 @@ export async function runModelSetup(deps: SetupDeps, flags: SetupFlags): Promise
       out(`  ${provider.label} (\`${provider.binary}\`): ${installed.get(id) ? "installed" : "not found on PATH"}`);
     }
 
-    let current: ModelConfig | undefined;
-    try {
-      current = await loadConfig(deps.configFile);
-    } catch (error) {
-      if (!(error instanceof ConfigError)) {
-        throw error;
-      }
-      out(`Ignoring the current config: ${error.message}`);
-    }
     if (current !== undefined) {
-      out(`Current: ${describe(current)}`);
+      out(`Current ${role}: ${describe(current)}`);
     }
 
     // Provider
@@ -134,21 +160,31 @@ export async function runModelSetup(deps: SetupDeps, flags: SetupFlags): Promise
       }
     }
 
-    const config: ModelConfig = {
-      version: 1,
+    const choice: ModelChoice = {
       provider: providerId,
       model,
       budget,
       ...(effort === undefined ? {} : { effort }),
     };
+    // A role is saved without touching the other one.
+    const config: ModelConfig =
+      role === "verifier" && saved !== undefined
+        ? { ...saved, verifier: choice }
+        : { version: 1, ...choice, ...(saved?.verifier === undefined ? {} : { verifier: saved.verifier }) };
 
     out();
+    out(`  Role      ${role}`);
     out(`  Provider  ${provider.label}`);
     out(`  Model     ${model === DEFAULT_MODEL ? `${DEFAULT_MODEL} (the CLI's own default)` : model}`);
     out(`  Budget    ${BUDGET_LABELS[budget]}`);
     out(`  Effort    ${effort ?? (provider.effortStyle === "slug" ? "set by the model slug" : "none: the model has no reasoning levels")}`);
     out(`  Config    ${deps.configFile}`);
     out();
+
+    if (role === "verifier" && saved !== undefined && saved.provider === choice.provider && saved.model === choice.model) {
+      out("Note: this is the reviewer's own model. A second look by the same model refutes less than one by another.");
+      out();
+    }
 
     if (!flags.yes && interactive) {
       const answer = (await prompter.ask("Save this? [Y/n]: ")).trim().toLowerCase();
@@ -159,7 +195,7 @@ export async function runModelSetup(deps: SetupDeps, flags: SetupFlags): Promise
 
     if (flags.verify) {
       out("Checking the choice with a one-word request...");
-      await probe(deps, provider, config);
+      await probe(deps, provider, choice);
       out("The model answered.");
     }
 
@@ -172,13 +208,13 @@ export async function runModelSetup(deps: SetupDeps, flags: SetupFlags): Promise
 }
 
 /** A one-line description of a config, for messages. */
-export function describe(config: ModelConfig): string {
+export function describe(config: ModelChoice): string {
   const effort = config.effort === undefined ? "" : `, effort ${config.effort}`;
   return `${config.provider} / ${config.model} (budget ${config.budget}${effort})`;
 }
 
 /** Runs the config's model on a trivial prompt, in an empty directory. */
-async function probe(deps: SetupDeps, provider: Provider, config: ModelConfig): Promise<void> {
+async function probe(deps: SetupDeps, provider: Provider, config: ModelChoice): Promise<void> {
   const workdir = await mkdtemp(join(tmpdir(), "small-change-probe-"));
   try {
     const answer = await provider.run(deps.exec, {
@@ -211,7 +247,7 @@ async function pickProvider(
   providers: Record<ProviderId, Provider>,
   installed: Map<ProviderId, boolean>,
   flag: ProviderId | undefined,
-  current: ModelConfig | undefined,
+  current: ModelChoice | undefined,
   interactive: boolean,
 ): Promise<ProviderId> {
   if (flag !== undefined) {
@@ -400,7 +436,11 @@ export async function describeConfig(configFile: string): Promise<string> {
   const config = await loadConfig(configFile);
   return config === undefined
     ? `No model is configured. Run \`small-change model setup\`. (${configFile})`
-    : `${describe(config)}\n${configFile}`;
+    : `${describe(config)}\n${
+        config.verifier === undefined
+          ? "verifier: none (run `small-change model setup --role verifier` to add one)"
+          : `verifier: ${describe(config.verifier)}`
+      }\n${configFile}`;
 }
 
 /** The models of every installed agent CLI, or of one. */

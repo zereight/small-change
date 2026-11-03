@@ -35,6 +35,22 @@ describe("config file", () => {
     assert.deepEqual(JSON.parse(await readFile(path, "utf8")), { version: 1, provider: "cursor", model: "b-high", budget: "medium" });
   });
 
+  it("round-trips a verifier, and a config without one stays without one", async () => {
+    const path = join(dir, "config.json");
+    const config = {
+      version: 1 as const,
+      provider: "claude" as const,
+      model: "opus",
+      budget: "large" as const,
+      effort: "xhigh" as const,
+      verifier: { provider: "muse" as const, model: "muse-spark-1.3", budget: "medium" as const, effort: "high" as const },
+    };
+    await saveConfig(path, config);
+    assert.deepEqual(await loadConfig(path), config);
+    await writeFile(path, '{"version":1,"provider":"claude","model":"opus","budget":"large"}');
+    assert.equal((await loadConfig(path))?.verifier, undefined);
+  });
+
   it("is undefined when missing", async () => {
     assert.equal(await loadConfig(join(dir, "none.json")), undefined);
   });
@@ -49,6 +65,9 @@ describe("config file", () => {
       ['{"version":1,"provider":"claude","model":"--evil","budget":"large"}', /invalid model/],
       ['{"version":1,"provider":"claude","model":"opus","budget":"huge"}', /unknown budget/],
       ['{"version":1,"provider":"claude","model":"opus","budget":"large","effort":"warp"}', /unknown effort/],
+      ['{"version":1,"provider":"claude","model":"opus","budget":"large","verifier":{"provider":"toString","model":"m","budget":"large"}}', /verifier: unknown provider/],
+      ['{"version":1,"provider":"claude","model":"opus","budget":"large","verifier":{"provider":"muse","model":"--evil","budget":"large"}}', /verifier: invalid model/],
+      ['{"version":1,"provider":"claude","model":"opus","budget":"large","verifier":"muse"}', /verifier: expected a JSON object/],
     ];
     for (const [text, message] of cases) {
       await writeFile(path, text);

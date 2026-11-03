@@ -21,12 +21,18 @@ Options:
   --context-bytes <n>      Show at most n bytes of the changed files' code besides the diff, so that
                            findings can rest on code around the change; 0: the diff only (default: 120000)
   --context-lines <n>      Lines shown around each change in a file too large to show whole (default: 40)
-  --timeout <seconds>      Give the agent this long (default: 900)
+  --no-verifier            Do not have the verifier try to refute the P1 and P2 findings, even if one
+                           is configured ("small-change model setup --role verifier")
+  --timeout <seconds>      Give each agent this long (default: 900)
   --config <file>          Read the model choice from this file instead of the default
   -h, --help               Show this help and exit
 
-The agent runs in an empty directory with its tools off and without any BITBUCKET_ variable,
-and the pull request's text is handed to it as data to review, not as instructions.
+The agents run in an empty directory with their tools off and without any BITBUCKET_ variable,
+and the pull request's text is handed to them as data to review, not as instructions.
+
+With a verifier configured, each P1 and P2 is shown to a second model that tries to refute it. A
+refutation needs a quote from the code, like the finding itself; the finding is then posted as a P3
+with the quote. If the verifier fails, nothing is posted.
 
 Environment:
   BITBUCKET_TOKEN          An access token for private repositories; with --post, also for writing`;
@@ -70,6 +76,7 @@ export function parseReviewArgs(argv: string[]): ReviewCommand {
     config: values.config,
     options: {
       post: values.post ?? false,
+      verifier: values.verifier ?? true,
       language: language ?? "English",
       maxFindings: positive(values["max-findings"], "--max-findings") ?? 10,
       maxDiffBytes: positive(values["max-diff-bytes"], "--max-diff-bytes") ?? 300_000,
@@ -84,8 +91,10 @@ function parse(argv: string[]) {
   return parseArgs({
     args: argv,
     allowPositionals: true,
+    allowNegative: true,
     options: {
       post: { type: "boolean" },
+      verifier: { type: "boolean" },
       language: { type: "string" },
       "max-findings": { type: "string" },
       "max-diff-bytes": { type: "string" },

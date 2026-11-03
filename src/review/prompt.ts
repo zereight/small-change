@@ -1,7 +1,8 @@
 import { randomBytes } from "node:crypto";
 import type { ContextFile, ContextOmission } from "./context.ts";
 
-export interface PromptInput {
+/** What the reviewer is shown about a pull request. */
+export interface Material {
   title: string;
   description: string;
   diff: string;
@@ -9,6 +10,9 @@ export interface PromptInput {
   files?: readonly ContextFile[];
   /** Changed files that are not in {@link files}, with the reason. */
   omitted?: readonly ContextOmission[];
+}
+
+export interface PromptInput extends Material {
   /** The language the findings are written in. */
   language: string;
   maxFindings: number;
@@ -22,13 +26,7 @@ export interface PromptInput {
  * the model is told to treat what is inside as data.
  */
 export function buildPrompt(input: PromptInput): string {
-  const files = input.files ?? [];
-  const omitted = input.omitted ?? [];
-  const material = [input.title, input.description, input.diff, ...files.map((file) => file.numbered)].join("\n");
-  let nonce = input.nonce ?? randomBytes(8).toString("hex");
-  while (material.includes(nonce)) {
-    nonce = randomBytes(8).toString("hex");
-  }
+  const { nonce, text } = fenceMaterial(input, [], input.nonce);
   const begin = `=== BEGIN PULL REQUEST ${nonce} ===`;
   const end = `=== END PULL REQUEST ${nonce} ===`;
 
@@ -63,18 +61,38 @@ Answer with a single JSON object and nothing else, in exactly this shape:
 {"findings":[{"severity":"P2","basis":"code","path":"src/a.ts","line":42,"title":"...","detail":"...","condition":"...","evidence":[{"path":"src/a.ts","line":42,"quote":"const total = items.length - 1;"}],"firing":null}]}
 
 ${begin}
-Title: ${input.title}
-
-Description:
-${input.description || "(none)"}
-
-Diff:
-${input.diff}
-
-Changed files with the code around the changes:
-${renderFiles(files, omitted)}
+${text}
 ${end}
 `;
+}
+
+/**
+ * The material as text, and a marker word that is in none of it nor in `extra` (other text that
+ * will sit in the same prompt), so that nothing in the material can close the fence.
+ */
+export function fenceMaterial(
+  material: Material,
+  extra: readonly string[] = [],
+  fixedNonce?: string,
+): { nonce: string; text: string } {
+  const files = material.files ?? [];
+  const omitted = material.omitted ?? [];
+  const text = `Title: ${material.title}
+
+Description:
+${material.description || "(none)"}
+
+Diff:
+${material.diff}
+
+Changed files with the code around the changes:
+${renderFiles(files, omitted)}`;
+  const everything = [text, ...extra].join("\n");
+  let nonce = fixedNonce ?? randomBytes(8).toString("hex");
+  while (everything.includes(nonce)) {
+    nonce = randomBytes(8).toString("hex");
+  }
+  return { nonce, text };
 }
 
 function renderFiles(files: readonly ContextFile[], omitted: readonly ContextOmission[]): string {

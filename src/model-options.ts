@@ -3,11 +3,13 @@ import { isBudget } from "./llm/budget.ts";
 import { isProviderId, PROVIDER_IDS } from "./llm/providers.ts";
 import type { Budget } from "./llm/budget.ts";
 import type { ProviderId } from "./llm/types.ts";
+import { isRole, ROLES, type Role } from "./model-config.ts";
 import { UsageError } from "./options.ts";
 
 export const MODEL_USAGE = `Usage: small-change model <command> [options]
 
-Chooses which agent CLI, model and reasoning budget "small-change review" runs on.
+Chooses which agent CLI, model and reasoning budget "small-change review" runs on, and,
+optionally, a second model (the verifier) that tries to refute each P1 and P2 it reports.
 
 Commands:
   setup                    Detect the agent CLIs and their models, choose, check and save
@@ -15,6 +17,9 @@ Commands:
   list                     Print the models of the installed agent CLIs
 
 Options for setup:
+  --role <name>            reviewer (default) or verifier. Choose the reviewer first. Use a model
+                           other than the reviewer's: a second look by the same model refutes less
+  --remove                 With --role verifier: delete the verifier from the config
   --provider <id>          ${PROVIDER_IDS.join(", ")}
   --model <id>             A model id, or "default" for the CLI's own default
   --budget <name>          unlimited (max effort), large (xhigh), medium (high) or small (medium)
@@ -37,6 +42,8 @@ export type ModelCommand =
       provider: ProviderId | undefined;
       model: string | undefined;
       budget: Budget | undefined;
+      role: Role;
+      remove: boolean;
       yes: boolean;
       verify: boolean;
       config: string | undefined;
@@ -69,11 +76,24 @@ export function parseModelArgs(argv: string[]): ModelCommand {
       if (budget !== undefined && !isBudget(budget)) {
         throw new UsageError(`Invalid --budget "${budget}": expected unlimited, large, medium or small`);
       }
+      const role = values.role ?? "reviewer";
+      if (!isRole(role)) {
+        throw new UsageError(`Invalid --role "${role}": expected ${ROLES.join(" or ")}`);
+      }
+      const remove = values.remove ?? false;
+      if (remove && role !== "verifier") {
+        throw new UsageError("--remove applies to the verifier only: pass --role verifier");
+      }
+      if (remove && (provider !== undefined || values.model !== undefined || budget !== undefined)) {
+        throw new UsageError("--remove cannot be combined with --provider, --model or --budget");
+      }
       return {
         command,
         provider,
         model: values.model,
         budget,
+        role,
+        remove,
         yes: values.yes ?? false,
         verify: values.verify ?? true,
         config: values.config,
@@ -97,6 +117,8 @@ function parse(argv: string[]) {
       provider: { type: "string" },
       model: { type: "string" },
       budget: { type: "string" },
+      role: { type: "string" },
+      remove: { type: "boolean" },
       yes: { type: "boolean", short: "y" },
       verify: { type: "boolean" },
       config: { type: "string" },

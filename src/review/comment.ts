@@ -10,7 +10,8 @@ export function headline(finding: Finding): string {
 
 /**
  * The comment's Markdown: the headline, where in the diff, the detail, the condition and the
- * evidence that back it, why it was graded lower than the model first said, and who wrote it.
+ * evidence that back it, why it was graded lower than the model first said (and the quote the
+ * second reviewer used, if it refuted the finding), and who wrote it.
  */
 export function formatComment(finding: Finding, footer: string): string {
   const where =
@@ -24,7 +25,10 @@ export function formatComment(finding: Finding, footer: string): string {
     finding.condition === undefined ? undefined : `Condition: ${neutralize(finding.condition)}`,
     finding.evidence.length === 0 ? undefined : `Evidence:\n${finding.evidence.map(quoteLine).join("\n")}`,
     finding.firing === undefined ? undefined : `Firing:\n${quoteLine(finding.firing)}`,
-    finding.lowered === undefined ? undefined : `_Graded ${finding.severity}, not ${finding.lowered.from}: ${finding.lowered.reason}._`,
+    finding.lowered === undefined
+      ? undefined
+      : `_Graded ${finding.severity}, not ${finding.lowered.from}: ${neutralize(finding.lowered.reason)}._`,
+    finding.counter === undefined ? undefined : `Against it:\n${quoteLine(finding.counter)}`,
     `_${footer}_`,
   ]
     .filter((part): part is string => part !== undefined)

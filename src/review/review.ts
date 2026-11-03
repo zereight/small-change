@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { BitbucketReview } from "../bitbucket.ts";
 import { agentEnv } from "../llm/exec.ts";
 import type { Exec, Provider } from "../llm/types.ts";
-import type { ModelConfig } from "../model-config.ts";
+import type { ModelChoice, ModelConfig } from "../model-config.ts";
 import type { PullRequestRef } from "../pr-url.ts";
 import { formatComment, headline } from "./comment.ts";
 import { buildContext, type ContextOmission } from "./context.ts";
@@ -12,6 +12,7 @@ import { parseDiff } from "./diff.ts";
 import { type Finding, parseFindings, SEVERITIES } from "./findings.ts";
 import { buildQuoteChecker } from "./material.ts";
 import { buildPrompt } from "./prompt.ts";
+import { applyVerdict, buildVerifyPrompt, bySeverity, isBlocking, parseVerdicts } from "./verify.ts";
 
 export interface ReviewOptions {
   maxFindings: number;
@@ -25,6 +26,8 @@ export interface ReviewOptions {
   language: string;
   /** Whether to post the findings as comments. */
   post: boolean;
+  /** Whether to have the verifier try to refute the P1 and P2 findings, when one is configured. */
+  verifier: boolean;
   timeoutMs: number;
 }
 
@@ -33,6 +36,8 @@ export interface ReviewDeps {
   provider: Provider;
   exec: Exec;
   config: ModelConfig;
+  /** A second model that tries to refute each P1 and P2. Without one, the reviewer's grades stand. */
+  verifier?: { provider: Provider; config: ModelChoice };
   env: NodeJS.ProcessEnv;
 }
 
@@ -48,6 +53,8 @@ export interface ReviewResult {
   dropped: number;
   /** Findings left out because of the limit. */
   omitted: number;
+  /** What the verifier did, when it ran: `provider/model`, and how many P1/P2 it checked and refuted. */
+  verification?: { by: string; checked: number; refuted: number; undecided: number };
   /** Findings posted as comments, when asked to post. */
   posted: { finding: Finding; commentId: number }[];
   /** Findings not posted because a comment with the same headline exists. */
@@ -58,7 +65,9 @@ export interface ReviewResult {
  * Reviews one PR: reads its diff and the code around it, has the configured agent review it, and,
  * when asked, posts each finding as a comment. The agent runs in an empty directory with its tools
  * off and without any Bitbucket credential in its environment; this tool reads the files and
- * posts, never the agent. A P1 or P2 is kept only when its quotes are really in what was shown.
+ * posts, never the agent. A P1 or P2 is kept only when its quotes are really in what was shown,
+ * and, when a verifier is configured, only when a second model could not refute it with a quote of
+ * its own. If the verifier fails, nothing is posted.
  */
 export async function runReview(
   deps: ReviewDeps,
@@ -66,6 +75,12 @@ export async function runReview(
   options: ReviewOptions,
 ): Promise<ReviewResult> {
   const { bitbucket, provider, config } = deps;
+  const verifier = options.verifier ? deps.verifier : undefined;
+  if (verifier !== undefined && !(await verifier.provider.isInstalled(deps.exec))) {
+    throw new Error(
+      `The verifier's \`${verifier.provider.binary}\` was not found on PATH; install it, or run with --no-verifier`,
+    );
+  }
   const [pullRequest, diff] = await Promise.all([bitbucket.getPullRequest(ref), bitbucket.getDiff(ref)]);
 
   const reviewer = `${provider.id}/${config.model}`;
@@ -97,38 +112,61 @@ export async function runReview(
   );
   result.context = { enabled: options.contextBytes > 0, files: context.files.length, bytes: context.bytes, omitted: context.omitted };
 
-  const workdir = await mkdtemp(join(tmpdir(), "small-change-review-"));
-  let answer: string;
-  try {
-    answer = await provider.run(deps.exec, {
-      prompt: buildPrompt({
-        title: pullRequest.title,
-        description: pullRequest.description,
-        diff,
-        files: context.files,
-        omitted: context.omitted,
-        language: options.language,
-        maxFindings: options.maxFindings,
-      }),
-      model: config.model,
-      effort: config.effort,
-      workdir,
-      env: agentEnv(deps.env),
-      timeoutMs: options.timeoutMs,
-    });
-  } finally {
-    await rm(workdir, { recursive: true, force: true });
-  }
+  const material = {
+    title: pullRequest.title,
+    description: pullRequest.description,
+    diff,
+    files: context.files,
+    omitted: context.omitted,
+  };
+  const answer = await runAgent(
+    deps,
+    provider,
+    config,
+    buildPrompt({ ...material, language: options.language, maxFindings: options.maxFindings }),
+    options.timeoutMs,
+  );
 
-  const parsed = parseFindings(answer, options.maxFindings, buildQuoteChecker(diffFiles, context.files));
+  const check = buildQuoteChecker(diffFiles, context.files);
+  const parsed = parseFindings(answer, options.maxFindings, check);
   result.findings = parsed.findings;
   result.dropped = parsed.dropped;
   result.omitted = parsed.omitted;
 
-  if (options.post && parsed.findings.length > 0) {
-    const footer = `small-change review · ${reviewer} · commit ${pullRequest.sourceCommit}`;
+  const candidates = parsed.findings.filter(isBlocking);
+  if (verifier !== undefined && candidates.length > 0) {
+    const by = `${verifier.provider.id}/${verifier.config.model}`;
+    let verdicts: ReturnType<typeof parseVerdicts>;
+    try {
+      const reply = await runAgent(
+        deps,
+        verifier.provider,
+        verifier.config,
+        buildVerifyPrompt({ ...material, candidates, language: options.language }),
+        options.timeoutMs,
+      );
+      verdicts = parseVerdicts(reply, candidates, check);
+    } catch (error) {
+      throw new Error(
+        `The verifier (${by}) failed, so nothing was posted: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      );
+    }
+    const verdictOf = new Map(candidates.map((finding, index) => [finding, verdicts[index]] as const));
+    result.findings = bySeverity(parsed.findings.map((finding) => applyVerdict(finding, verdictOf.get(finding), by)));
+    result.verification = {
+      by,
+      checked: candidates.length,
+      refuted: verdicts.filter((verdict) => verdict?.verdict === "refuted").length,
+      undecided: verdicts.filter((verdict) => verdict === undefined || verdict.verdict === "unclear").length,
+    };
+  }
+
+  if (options.post && result.findings.length > 0) {
+    const checkedBy = result.verification === undefined ? "" : ` · checked by ${result.verification.by}`;
+    const footer = `small-change review · ${reviewer}${checkedBy} · commit ${pullRequest.sourceCommit}`;
     const existing = (await bitbucket.getComments(ref)).map((comment) => comment.body.split("\n")[0]);
-    for (const finding of parsed.findings) {
+    for (const finding of result.findings) {
       if (existing.includes(headline(finding))) {
         result.alreadyPosted.push(finding);
         continue;
@@ -138,7 +176,7 @@ export async function runReview(
         result.posted.push({ finding, commentId });
       } catch (error) {
         throw new Error(
-          `Posted ${result.posted.length} of ${parsed.findings.length} comments before failing: ${
+          `Posted ${result.posted.length} of ${result.findings.length} comments before failing: ${
             error instanceof Error ? error.message : String(error)
           }`,
           { cause: error },
@@ -147,6 +185,29 @@ export async function runReview(
     }
   }
   return result;
+}
+
+/** Runs one agent on one prompt, in an empty directory, with no Bitbucket variable in its environment. */
+async function runAgent(
+  deps: ReviewDeps,
+  provider: Provider,
+  choice: ModelChoice,
+  prompt: string,
+  timeoutMs: number,
+): Promise<string> {
+  const workdir = await mkdtemp(join(tmpdir(), "small-change-review-"));
+  try {
+    return await provider.run(deps.exec, {
+      prompt,
+      model: choice.model,
+      effort: choice.effort,
+      workdir,
+      env: agentEnv(deps.env),
+      timeoutMs,
+    });
+  } finally {
+    await rm(workdir, { recursive: true, force: true });
+  }
 }
 
 const SHOWN_OMISSIONS = 4;
@@ -158,6 +219,11 @@ export function formatReview(result: ReviewResult, post: boolean): string {
     `${ref.workspace}/${ref.repo}#${ref.id} "${title}"`,
     `reviewed commit ${sourceCommit} with ${result.reviewer}`,
     contextLine(result.context),
+    ...(result.verification === undefined
+      ? []
+      : [
+          `checked by ${result.verification.by}: ${result.verification.checked} P1/P2 checked, ${result.verification.refuted} refuted, ${result.verification.undecided} not decided`,
+        ]),
     "",
   ];
   for (const finding of result.findings) {
@@ -175,6 +241,13 @@ export function formatReview(result: ReviewResult, post: boolean): string {
     if (finding.lowered !== undefined) {
       lines.push(`      lowered from ${finding.lowered.from}: ${finding.lowered.reason}`);
     }
+    if (finding.opinion !== undefined && finding.opinion.verdict !== "refuted") {
+      lines.push(`      second reviewer: ${finding.opinion.verdict}${finding.opinion.reason === undefined ? "" : `: ${finding.opinion.reason}`}`);
+    }
+    if (finding.counter !== undefined) {
+      const { path, line, quote } = finding.counter;
+      lines.push(`      against it: ${path ?? ""}${line === undefined ? "" : `:${line}`} ${oneLine(quote)}`.replace(/ +/g, " "));
+    }
   }
   if (result.findings.length === 0) {
     lines.push("No findings.");
@@ -186,7 +259,7 @@ export function formatReview(result: ReviewResult, post: boolean): string {
     lines.push("", `${result.findings.length} finding(s): ${counts}.`);
     const lowered = result.findings.filter((finding) => finding.lowered !== undefined).length;
     if (lowered > 0) {
-      lines.push(`${lowered} of them were graded lower than the reviewer first said, because they were not proven.`);
+      lines.push(`${lowered} of them were graded lower than the reviewer first said, because they were not proven or were refuted.`);
     }
   }
   if (result.omitted > 0) {

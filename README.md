@@ -174,7 +174,8 @@ that stops at `high` means `high`. Setup prints the slug or effort it ended up w
 
 The choice is saved in `$XDG_CONFIG_HOME/small-change/config.json`, else
 `~/.config/small-change/config.json`; `--config <file>` overrides it for any `model` or `review`
-command.
+command. The choice above is the reviewer; a second model can be added as the verifier, see
+[A second opinion](#a-second-opinion-the-verifier).
 
 ### Running a review
 
@@ -188,7 +189,7 @@ small-change review https://bitbucket.org/team/platform/pull-requests/128 --post
 Posting needs `BITBUCKET_TOKEN` with write access to pull requests. A finding is skipped when a
 comment on the PR already opens with the same line, so running the review twice does not post
 twice. Other flags: `--language`, `--max-findings`, `--max-diff-bytes`, `--context-bytes`,
-`--context-lines`, `--timeout`.
+`--context-lines`, `--no-verifier`, `--timeout`.
 
 ### What a P1 or P2 needs
 
@@ -213,7 +214,38 @@ grade it was lowered from and why, and the output prints `lowered from ...`.
 What this does not do: a quote proves that the code exists, not that the conclusion follows from
 it. A finding with real quotes can still be wrong, for example when a comment in the code says the
 behavior is deliberate. The prompt asks the reviewer to try to refute each P1 and P2 first, but
-nothing checks that it did.
+nothing checks that it did. A second model can be asked to, see the next section.
+
+### A second opinion: the verifier
+
+```sh
+small-change model setup --role verifier --provider claude --model opus --budget medium
+small-change model setup --role verifier --remove      # take it away again
+```
+
+With a verifier saved, every P1 and P2 the reviewer reports is shown to the second model, along
+with the same diff and code, and the job of refuting it. The verifier must answer for each finding
+with `upheld`, `refuted` or `unclear`. A refutation counts only with a reason and a `counter`
+quote that is found in what was shown, the same bar the finding itself had to clear; without it
+the verdict is `unclear`. A refuted finding is posted as a P3 that says who refuted it and why and
+shows the quote ("Against it"), so the author still sees it and can disagree; it just does not
+count for the check. The output shows what the verifier said about the ones that stayed
+(`second reviewer: unclear: ...`), and the comment footer names it (`checked by claude/opus`).
+
+- Choose a model other than the reviewer's; the setup says so when they are the same. Use
+  `--no-verifier` on a single `review` to skip it.
+- It runs only when there is a P1 or P2 to check, so a clean review costs no second request.
+- It is a part of the review, not an extra: if the verifier fails (not installed, a timeout, an
+  answer that is not the expected JSON), the review stops and posts nothing, rather than posting
+  grades that were never checked.
+- It sees only what the reviewer saw. A finding that is wrong because of code outside the PR (for
+  example, an import that is fine because other files in the repository do the same) cannot be
+  refuted from the diff and the changed files, and stays `unclear`. On a real PR, a wrong P1 and a
+  wrong P2 of that kind survived two of six runs. The verifier's reasons were not printed in those
+  runs yet, so that this is the cause is likely, not confirmed.
+- A quote that exists is not proof that it says what the verifier claims. A refutation can rest on
+  a real but loosely related comment, and a real bug can be refuted wrongly. Refuted findings are
+  posted, not dropped, so that a person can see it.
 
 ### The code around the change
 

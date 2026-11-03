@@ -90,6 +90,7 @@ async function review(argv: string[]): Promise<number> {
       provider: PROVIDERS[config.provider],
       exec: defaultExec,
       config,
+      ...(config.verifier === undefined ? {} : { verifier: { provider: PROVIDERS[config.verifier.provider], config: config.verifier } }),
       env: process.env,
     },
     command.ref,
