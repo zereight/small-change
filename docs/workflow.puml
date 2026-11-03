@@ -1,0 +1,87 @@
+@startuml
+!theme plain
+skinparam dpi 150
+skinparam shadowing false
+skinparam ArrowColor #444444
+skinparam activity {
+  BackgroundColor #F4F6F8
+  BorderColor #5B6770
+}
+skinparam partition {
+  BorderColor #9AA5AE
+  BackgroundColor #FFFFFF
+}
+skinparam note {
+  BackgroundColor #FFF8E1
+  BorderColor #C9A227
+}
+
+title small-change: one run, from a PR URL to an exit code
+
+start
+:small-change <PR URL> --kind backend;
+note right
+  Any error during the run ends it with **exit 2**:
+  an HTTP error (429, 403, 404 ...), a malformed
+  token, or a .small_change that cannot be parsed.
+end note
+:Parse the options and the PR URL;
+
+if (Usage valid?) then (no)
+  :Print the usage text;<<#F5B7B1>>
+  :exit 2;<<#F5B7B1>>
+  stop
+else (yes)
+endif
+
+partition "Read from Bitbucket Cloud  (BITBUCKET_TOKEN sent as a Bearer token)" {
+  :GET the pull request\nauthor and destination commit;
+  fork
+    :GET diffstat\nchanged files and line counts;
+  fork again
+    :GET comments\n(deleted ones are dropped);
+  fork again
+    :GET .small_change at the\ndestination commit, never the PR head;
+  end fork
+  :Changed paths: both sides of a rename\nService: the first N directories of a path;
+}
+
+partition "Local checks  (pure functions over the data above)" {
+  split
+    :**size**\nadded + removed lines\nfewer than the limit;
+  split again
+    :**review-findings**\nno unresolved comment matching P1 / P2\n(only from --bot, when given);
+  split again
+    :**services**\naffected services\nfewer than the limit;
+  split again
+    :**exclusions**\nno path matches .small_change,\nand .small_change itself is unchanged;
+  end split
+}
+
+if (All four checks passed?) then (yes)
+  partition "author-history" {
+    :List the author's PRs, newest first,\nkeeping only the MERGED ones;
+note right
+  Many requests (two per PR read),
+  so this runs only when needed.
+end note
+    repeat
+      :GET the diffstat of one merged PR;
+      :Count it for every affected\nservice it touches;
+    repeat while (A service is below the minimum,\nthe scan limit is not reached\nand merged PRs remain?) is (yes) not (no)
+    :Pass when every affected service has\nat least the minimum number of merged PRs;
+  }
+else (no)
+  :author-history is **SKIP**\nthe PR is not small whatever the history says;
+endif
+
+:Print one PASS / FAIL / SKIP line per check,\nwith its details;
+
+if (Every check passed?) then (yes)
+  :exit 0\nsmall change;<<#A9DFBF>>
+else (no)
+  :exit 1\nnot a small change;<<#F9E79F>>
+endif
+stop
+
+@enduml

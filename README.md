@@ -27,6 +27,12 @@ Result: not a small change
 Exit code `0`: a small change. `1`: not a small change. `2`: usage error, or Bitbucket could not be
 read.
 
+## How a run works
+
+![The workflow of one small-change run: read the pull request from Bitbucket, run four local checks, run the author-history check only if they pass, then report and exit](docs/workflow.png)
+
+The diagram's source is [`docs/workflow.puml`](docs/workflow.puml).
+
 ## The rules
 
 A PR is a small change only if **all** of these hold.
@@ -158,6 +164,9 @@ npm test            # node --test, running the TypeScript sources directly
 npm run typecheck
 npm run build
 ```
+
+The workflow diagram is PlantUML. After changing `docs/workflow.puml`, render it again with
+`plantuml -tpng docs/workflow.puml` (Graphviz is required).
 
 No runtime dependencies. The checks are pure functions over data (`src/checks.ts`); `src/bitbucket.ts`
 is the only module that talks to the network.
