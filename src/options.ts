@@ -9,8 +9,11 @@ export class UsageError extends Error {
   }
 }
 
-/** The service limit of each kind of monorepo: a small change affects fewer services than this. */
-export const SERVICE_LIMITS = { frontend: 1, backend: 3 } as const;
+/**
+ * The service limit of each kind of monorepo: a small change affects fewer services than this.
+ * A frontend change may touch one service, so its limit is 2; a backend one may touch two.
+ */
+export const SERVICE_LIMITS = { frontend: 2, backend: 3 } as const;
 
 const DEFAULT_FINDING_PATTERN = "\\bP[12]\\b";
 
@@ -23,8 +26,8 @@ Arguments:
   <PR URL>                 https://bitbucket.org/<workspace>/<repo>/pull-requests/<id>
 
 Options:
-  --kind <kind>            The monorepo's kind: frontend (fewer than ${SERVICE_LIMITS.frontend} affected service) or
-                           backend (fewer than ${SERVICE_LIMITS.backend})
+  --kind <kind>            The monorepo's kind: frontend (fewer than ${SERVICE_LIMITS.frontend} affected services, so
+                           one at most) or backend (fewer than ${SERVICE_LIMITS.backend}, so two at most)
   --max-services <n>       Fewer than n affected services, instead of --kind
   --max-lines <n>          Fewer than n lines changed, added plus removed (default: 1000)
   --min-merged <n>         The author must have merged n PRs in each affected service (default: 10)

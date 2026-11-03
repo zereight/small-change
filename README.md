@@ -46,7 +46,7 @@ A PR is a small change only if **all** of these hold.
 | **size**: fewer than N lines changed, added plus removed | 1000 | `--max-lines` |
 | **review-findings**: no unresolved P1 or P2 finding from the automated review | `\bP[12]\b`, any commenter | `--bot`, `--finding-pattern` |
 | **author-history**: the author has merged at least N PRs in *each* affected service | 10 | `--min-merged`, `--history-limit` |
-| **services**: fewer than N affected services | frontend 1, backend 3 | `--kind`, `--max-services`, `--service-depth` |
+| **services**: fewer than N affected services | frontend 2 (one at most), backend 3 (two at most) | `--kind`, `--max-services`, `--service-depth` |
 | **exclusions**: no changed path is listed in `.small_change` | none excluded | |
 
 `--kind frontend|backend` picks the service limit of the monorepo; `--max-services <n>` sets it
@@ -237,9 +237,10 @@ The rules leave room for interpretation. These are the choices made here; each i
 - **A service is a directory.** The first `--service-depth` directories of a path (default 2, so
   `services/payments`). A file at the repository root belongs to the service `.`, which counts as
   one.
-- **The limits are strict.** "Fewer than N" means `count < N`. With `--kind frontend` (N = 1) only a
-  PR that affects no service passes, so a PR that touches even one frontend service fails. If the
-  rule should read "at most one", pass `--max-services 2`.
+- **The limits are "fewer than N".** That means `count < N`. Read literally with N = 1, a frontend
+  PR would pass only when it touches no service, and an 8-line change to one file failed. So
+  `--kind frontend` uses N = 2: one affected service is allowed. `--kind backend` keeps N = 3, so
+  two are. `--max-services <n>` sets N directly.
 - **Author history is per service.** The author's merged PRs are read newest first, one by one, and
   a PR counts for every affected service it touches. It stops when each service has enough, or after
   `--history-limit` PRs (default 100), in which case the check fails. The PRs are read one at a time,

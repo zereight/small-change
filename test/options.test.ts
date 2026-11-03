@@ -25,8 +25,8 @@ describe("parseCliArgs", () => {
     assert.ok(!options.findingPattern.test("P3"));
   });
 
-  it("maps --kind frontend to a limit of 1", () => {
-    assert.equal(run(URL, "--kind", "frontend").options.maxServices, 1);
+  it("maps --kind frontend to a limit of 2: one affected service is allowed", () => {
+    assert.equal(run(URL, "--kind", "frontend").options.maxServices, 2);
   });
 
   it("takes --max-services instead of --kind", () => {
