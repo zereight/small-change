@@ -89,11 +89,40 @@ node dist/cli.js --help
 
 ## Authentication
 
-Set `BITBUCKET_TOKEN` to an access token that can read the repository's pull requests and contents.
-It is sent as a `Bearer` token to `api.bitbucket.org` only, and never printed. Public repositories
-work without a token, but Bitbucket limits anonymous requests heavily (HTTP 429). One run makes about
-five requests, plus, for the author-history check, one per page of the author's PR list and two for
-each PR it reads.
+Set `BITBUCKET_TOKEN` to a token that can read the repository's pull requests and contents. It is
+sent as a `Bearer` token to `api.bitbucket.org` only, and never printed. Bitbucket accepts Bearer
+authentication for both kinds of token, so either works, and no email address is needed:
+
+- an **access token** for the repository, project or workspace (scopes: pull requests read,
+  repository read); this one has its own bot identity, separate from any person;
+- an Atlassian account **API token** (scopes `read:pullrequest:bitbucket` and
+  `read:repository:bitbucket`); this one acts as the account that owns it.
+
+Bearer authentication has been tried against a private repository. If your token lives in another
+variable, map it: `export BITBUCKET_TOKEN="$BITBUCKET_API_TOKEN"`.
+
+Public repositories work without a token, but Bitbucket limits anonymous requests heavily (HTTP
+429). One run makes about five requests, plus, for the author-history check, one per page of the
+author's PR list and two for each PR it reads.
+
+### Naming the review bot
+
+`--bot` takes the name, nickname or UUID of whoever posts the review comments, and Bitbucket Cloud
+has no separate "bot" object: the author is the identity of the token the automation uses. With an
+access token it is the token's own bot identity; with a personal API token it is that person, so
+their human comments would match too. In that case narrow `--finding-pattern` to the format only the
+automation writes.
+
+To see who commented on a PR, with their type, name and UUID:
+
+```sh
+curl -s -H "Authorization: Bearer $BITBUCKET_TOKEN" \
+  "https://api.bitbucket.org/2.0/repositories/<workspace>/<repo>/pullrequests/<id>/comments?pagelen=100" \
+  | node -e 'const d=JSON.parse(require("fs").readFileSync(0,"utf8"));for(const u of new Set(d.values.map(c=>[c.user.type,c.user.display_name,c.user.uuid].join("\t"))))console.log(u)'
+```
+
+The name is compared exactly (case and braces ignored). A name that matches nobody reads as "no
+findings", so check the spelling.
 
 ## Choices to check
 
@@ -107,7 +136,8 @@ The rules leave room for interpretation. These are the choices made here; each i
   rule should read "at most one", pass `--max-services 2`.
 - **Author history is per service.** The author's merged PRs are read newest first, one by one, and
   a PR counts for every affected service it touches. It stops when each service has enough, or after
-  `--history-limit` PRs (default 100), in which case the check fails.
+  `--history-limit` PRs (default 100), in which case the check fails. The PRs are read one at a time,
+  at about a second each, so 100 PRs take a couple of minutes.
 - **Only unresolved findings count.** Without `--bot`, a comment from anyone that matches the
   pattern is a finding; `--bot` narrows that to the named review bots (name, nickname or UUID).
 - **A renamed file counts on both sides**: its old and new path are both checked against the
@@ -118,7 +148,6 @@ The rules leave room for interpretation. These are the choices made here; each i
 ## Not covered
 
 - Bitbucket Data Center. Only `https://bitbucket.org/<workspace>/<repo>/pull-requests/<id>` URLs.
-- Atlassian account API tokens, which use Basic authentication. Only a Bearer access token.
 - Acting on the verdict: the tool reports, and the pipeline decides what to do with the exit code.
 - Whether a PR from a fork can be read has not been verified.
 
