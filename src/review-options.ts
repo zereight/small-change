@@ -18,6 +18,9 @@ Options:
   --language <name>        The language of the findings (default: English)
   --max-findings <n>       Report at most n findings (default: 10)
   --max-diff-bytes <n>     Refuse a diff larger than n bytes (default: 300000)
+  --context-bytes <n>      Show at most n bytes of the changed files' code besides the diff, so that
+                           findings can rest on code around the change; 0: the diff only (default: 120000)
+  --context-lines <n>      Lines shown around each change in a file too large to show whole (default: 40)
   --timeout <seconds>      Give the agent this long (default: 900)
   --config <file>          Read the model choice from this file instead of the default
   -h, --help               Show this help and exit
@@ -70,6 +73,8 @@ export function parseReviewArgs(argv: string[]): ReviewCommand {
       language: language ?? "English",
       maxFindings: positive(values["max-findings"], "--max-findings") ?? 10,
       maxDiffBytes: positive(values["max-diff-bytes"], "--max-diff-bytes") ?? 300_000,
+      contextBytes: nonNegative(values["context-bytes"], "--context-bytes") ?? 120_000,
+      contextLines: positive(values["context-lines"], "--context-lines") ?? 40,
       timeoutMs: (positive(values.timeout, "--timeout") ?? 900) * 1000,
     },
   };
@@ -84,11 +89,24 @@ function parse(argv: string[]) {
       language: { type: "string" },
       "max-findings": { type: "string" },
       "max-diff-bytes": { type: "string" },
+      "context-bytes": { type: "string" },
+      "context-lines": { type: "string" },
       timeout: { type: "string" },
       config: { type: "string" },
       help: { type: "boolean", short: "h" },
     },
   });
+}
+
+function nonNegative(value: string | undefined, flag: string): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const number = Number(value);
+  if (!/^\d+$/.test(value) || !Number.isSafeInteger(number)) {
+    throw new UsageError(`Invalid ${flag} "${value}": expected a non-negative integer`);
+  }
+  return number;
 }
 
 function positive(value: string | undefined, flag: string): number | undefined {

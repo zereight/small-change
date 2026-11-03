@@ -49,14 +49,14 @@ describe("parseReviewArgs", () => {
       command: "review",
       ref: { workspace: "team", repo: "repo", id: 12 },
       config: undefined,
-      options: { post: false, language: "English", maxFindings: 10, maxDiffBytes: 300_000, timeoutMs: 900_000 },
+      options: { post: false, language: "English", maxFindings: 10, maxDiffBytes: 300_000, contextBytes: 120_000, contextLines: 40, timeoutMs: 900_000 },
     });
   });
 
   it("parses the flags", () => {
-    const parsed = parseReviewArgs([URL, "--post", "--language", "Korean", "--max-findings", "3", "--max-diff-bytes", "5000", "--timeout", "60", "--config", "/c"]);
+    const parsed = parseReviewArgs([URL, "--post", "--language", "Korean", "--max-findings", "3", "--max-diff-bytes", "5000", "--context-bytes", "0", "--context-lines", "10", "--timeout", "60", "--config", "/c"]);
     assert.ok(parsed.command === "review");
-    assert.deepEqual(parsed.options, { post: true, language: "Korean", maxFindings: 3, maxDiffBytes: 5000, timeoutMs: 60_000 });
+    assert.deepEqual(parsed.options, { post: true, language: "Korean", maxFindings: 3, maxDiffBytes: 5000, contextBytes: 0, contextLines: 10, timeoutMs: 60_000 });
     assert.equal(parsed.config, "/c");
   });
 
@@ -64,6 +64,9 @@ describe("parseReviewArgs", () => {
     assert.throws(() => parseReviewArgs([]), /Missing required argument/);
     assert.throws(() => parseReviewArgs(["https://example.com/x"]), /Invalid PR URL/);
     assert.throws(() => parseReviewArgs([URL, "--max-findings", "0"]), /positive integer/);
+    assert.throws(() => parseReviewArgs([URL, "--context-lines", "0"]), /positive integer/);
+    assert.throws(() => parseReviewArgs([URL, "--context-bytes=-1"]), /non-negative integer/);
+    assert.throws(() => parseReviewArgs([URL, "--context-bytes", "1.5"]), /non-negative integer/);
     assert.throws(() => parseReviewArgs([URL, "--language", "a\nb"]), /Invalid --language/);
     assert.throws(() => parseReviewArgs([URL, "--language", ""]), /Invalid --language/);
     assert.throws(() => parseReviewArgs([URL, URL]), /Unexpected extra/);

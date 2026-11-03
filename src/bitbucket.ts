@@ -270,7 +270,8 @@ export function createBitbucket(options: BitbucketOptions = {}): BitbucketReview
 
     async getFile(repository, commit, path) {
       try {
-        return await (await getResponse(`${repositoryUrl(repository)}/src/${commit}/${path}`)).text();
+        const encoded = path.split("/").map(encodeURIComponent).join("/");
+        return await (await getResponse(`${repositoryUrl(repository)}/src/${commit}/${encoded}`)).text();
       } catch (error) {
         if (error instanceof HttpError && error.status === 404) {
           return undefined;

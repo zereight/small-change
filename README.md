@@ -187,7 +187,44 @@ small-change review https://bitbucket.org/team/platform/pull-requests/128 --post
 `--finding-pattern` of the check counts it. Name the posting identity in the check with `--bot`.
 Posting needs `BITBUCKET_TOKEN` with write access to pull requests. A finding is skipped when a
 comment on the PR already opens with the same line, so running the review twice does not post
-twice. Other flags: `--language`, `--max-findings`, `--max-diff-bytes`, `--timeout`.
+twice. Other flags: `--language`, `--max-findings`, `--max-diff-bytes`, `--context-bytes`,
+`--context-lines`, `--timeout`.
+
+### What a P1 or P2 needs
+
+P1 and P2 are what the check counts, so a wrong one blocks a merge. The reviewer therefore has to
+prove them, and the proof is checked by this tool, not by the model:
+
+| Grade | Meaning | Counted by the check |
+| --- | --- | --- |
+| `P1` | must be fixed before merge | yes |
+| `P2` | should be fixed | yes |
+| `P3` | minor, or a gap whose trigger is not shown | no |
+| `ASK` | a question to the author | no |
+
+A P1 or P2 keeps its grade only when it has a `condition` (the input or state sequence that
+triggers it) and at least one `evidence` quote that is found word for word, in the right file, in
+what the reviewer was shown (the diff and the code around it; quotes under 10 characters do not
+count). A defect that needs a run-time event (a throw, a false return, a screen that is gone)
+needs a `firing` quote that shows the event too. One that rests on a server contract or on code
+that was not shown becomes an `ASK`. Anything else is posted as a P3 with a line saying which
+grade it was lowered from and why, and the output prints `lowered from ...`.
+
+What this does not do: a quote proves that the code exists, not that the conclusion follows from
+it. A finding with real quotes can still be wrong, for example when a comment in the code says the
+behavior is deliberate. The prompt asks the reviewer to try to refute each P1 and P2 first, but
+nothing checks that it did.
+
+### The code around the change
+
+The diff alone shows 3 lines around each change, so a finding about the rest of the file would be
+a guess. This tool reads each changed file at the PR's source commit through the Bitbucket API and
+shows the reviewer the whole file when it is up to 16000 bytes, else the `--context-lines` lines
+(default 40) around each change, up to `--context-bytes` in all (default 120000; `0` shows the
+diff only). Not shown, and listed with the reason in the prompt and in the output: deleted and
+binary files, new files (the diff already has all of them), lock files, generated and minified
+files, a file that cannot be read, and what does not fit in the size limit. The reviewer still has
+no tools; only the files of the PR itself are read, and they are fenced as data like the diff.
 
 What keeps an untrusted PR from steering the review:
 
@@ -202,7 +239,7 @@ What keeps an untrusted PR from steering the review:
   it. Two attempts are not proof that no tool call can get through.
 - Its environment has no `BITBUCKET_*` variable, so it never holds the token that can comment.
   Posting is done by this tool, never by the agent.
-- The title, description and diff sit between markers that are random on every run, and the agent
+- The title, description, diff and the code of the changed files sit between markers that are random on every run, and the agent
   is told they are data to review, not instructions. This lowers the risk; it does not remove it.
   An author can still word a diff to talk a model into reporting nothing, so a clean review is
   not proof that a PR is safe.
