@@ -12,7 +12,11 @@ export interface Person {
 export interface PullRequest {
   id: number;
   title: string;
+  /** The PR's description (Markdown), empty when there is none. */
+  description: string;
   author: Person;
+  /** The source branch's tip: the commit a review of the diff belongs to. */
+  sourceCommit: string;
   /** The destination branch's tip. The exclusion file is read here, never from the PR's own head. */
   destinationCommit: string;
 }
@@ -44,6 +48,14 @@ export interface Bitbucket {
   listMergedPullRequestIds(repository: RepositoryRef, authorUuid: string): AsyncIterable<number>;
   /** The file's text at `commit`, or undefined when it does not exist there. */
   getFile(repository: RepositoryRef, commit: string, path: string): Promise<string | undefined>;
+}
+
+/** What a review adds to {@link Bitbucket}: the diff to read and a comment to post. */
+export interface BitbucketReview extends Bitbucket {
+  /** The PR's unified diff. */
+  getDiff(ref: PullRequestRef): Promise<string>;
+  /** Posts a general (not inline) comment and returns its id. Needs write access to pull requests. */
+  postComment(ref: PullRequestRef, body: string): Promise<number>;
 }
 
 export class HttpError extends Error {
@@ -80,15 +92,19 @@ interface Page<T> {
   next?: string;
 }
 
-export function createBitbucket(options: BitbucketOptions = {}): Bitbucket {
+export function createBitbucket(options: BitbucketOptions = {}): BitbucketReview {
   const doFetch = options.fetch ?? fetch;
   const headers = authorizationHeaders(options.token);
   const hasToken = Boolean(options.token);
 
-  async function getResponse(url: string): Promise<Response> {
+  async function getResponse(url: string, init: RequestInit = {}): Promise<Response> {
     let response: Response;
     try {
-      response = await doFetch(url, { headers, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+      response = await doFetch(url, {
+        ...init,
+        headers: { ...headers, ...(init.headers as Record<string, string> | undefined) },
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
     } catch (error) {
       if (error instanceof Error && error.name === "TimeoutError") {
         throw new Error(`Bitbucket request timed out after ${REQUEST_TIMEOUT_MS} ms: ${url}`);
@@ -145,17 +161,22 @@ export function createBitbucket(options: BitbucketOptions = {}): Bitbucket {
       const raw = await getJson<{
         id: number;
         title?: string;
+        description?: string | null;
         author?: RawPerson;
+        source?: { commit?: { hash?: string } | null };
         destination?: { commit?: { hash?: string } | null };
       }>(pullRequestUrl(ref));
       const destinationCommit = raw.destination?.commit?.hash;
-      if (destinationCommit === undefined) {
-        throw new Error(`Bitbucket returned no destination commit for pull request ${ref.id}`);
+      const sourceCommit = raw.source?.commit?.hash;
+      if (destinationCommit === undefined || sourceCommit === undefined) {
+        throw new Error(`Bitbucket returned no source or destination commit for pull request ${ref.id}`);
       }
       return {
         id: raw.id,
         title: raw.title ?? "",
+        description: raw.description ?? "",
         author: toPerson(raw.author),
+        sourceCommit,
         destinationCommit,
       };
     },
@@ -216,6 +237,35 @@ export function createBitbucket(options: BitbucketOptions = {}): Bitbucket {
           yield pr.id;
         }
       }
+    },
+
+    async getDiff(ref) {
+      // The diff endpoint answers with a redirect to the same host; fetch follows it.
+      return (await getResponse(`${pullRequestUrl(ref)}/diff`)).text();
+    },
+
+    async postComment(ref, body) {
+      let response: Response;
+      try {
+        response = await getResponse(`${pullRequestUrl(ref)}/comments`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content: { raw: body } }),
+        });
+      } catch (error) {
+        if (error instanceof HttpError && (error.status === 401 || error.status === 403)) {
+          throw new HttpError(
+            `${error.message} — posting needs a token with write access to pull requests`,
+            error.status,
+          );
+        }
+        throw error;
+      }
+      const created = (await response.json()) as { id?: number };
+      if (typeof created.id !== "number") {
+        throw new Error("Bitbucket accepted the comment but returned no id");
+      }
+      return created.id;
     },
 
     async getFile(repository, commit, path) {

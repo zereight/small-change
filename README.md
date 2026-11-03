@@ -27,6 +27,10 @@ Result: not a small change
 Exit code `0`: a small change. `1`: not a small change. `2`: usage error, or Bitbucket could not be
 read.
 
+The check itself calls no LLM. A separate `review` command can have an agent CLI you are already
+logged in to (Claude Code, Cursor's `agent`, or Codex) review the PR and post findings that the
+check then counts; see [Reviewing with an LLM](#reviewing-with-an-llm).
+
 ## How a run works
 
 ![The workflow of one small-change run: read the pull request from Bitbucket, run four local checks, run the author-history check only if they pass, then report and exit](docs/workflow.png)
@@ -130,6 +134,83 @@ curl -s -H "Authorization: Bearer $BITBUCKET_TOKEN" \
 The name is compared exactly (case and braces ignored). A name that matches nobody reads as "no
 findings", so check the spelling.
 
+## Reviewing with an LLM
+
+`small-change review` has an agent CLI read the PR's diff and report problems, graded **P1** (must
+fix), **P2** (should fix) and **P3** (minor). No API key is involved: it drives the CLI you are
+logged in to, headless.
+
+| Provider | CLI | Models | How the budget is applied |
+| --- | --- | --- | --- |
+| `claude` | `claude` | Cannot be listed; aliases are suggested (`opus`, `sonnet`, `haiku`, ...) | `--effort` |
+| `cursor` | `agent` | `agent --list-models` | The effort is part of the model slug (`grok-4.7-xhigh`), so the budget swaps the slug |
+| `codex` | `codex` | `codex debug models` | `-c model_reasoning_effort=...`, clamped to what the model supports |
+
+### Choosing the model: `small-change model setup`
+
+```sh
+small-change model setup                # asks for provider, model and budget
+small-change model setup --provider cursor --model grok-4.7-low --budget large --yes   # for a script
+small-change model list                 # the models of every installed CLI
+small-change model show                 # the saved choice
+```
+
+Setup detects the CLIs on PATH and their models, starts from the saved choice, applies the budget,
+shows the result, and asks to confirm. Before saving, it sends a one-word request with the chosen
+model, so a model the account rejects is never saved (`--no-verify` skips this). The file is
+rewritten whole, so running setup again gives the same result.
+
+| Budget | Effort |
+| --- | --- |
+| `unlimited` | max |
+| `large` | xhigh |
+| `medium` | high |
+| `small` | medium |
+
+When a model does not offer the effort, the highest one below it is used: `unlimited` on a model
+that stops at `high` means `high`. Setup prints the slug or effort it ended up with.
+
+The choice is saved in `$XDG_CONFIG_HOME/small-change/config.json`, else
+`~/.config/small-change/config.json`; `--config <file>` overrides it for any `model` or `review`
+command.
+
+### Running a review
+
+```sh
+small-change review https://bitbucket.org/team/platform/pull-requests/128            # print findings
+small-change review https://bitbucket.org/team/platform/pull-requests/128 --post     # and comment
+```
+
+`--post` posts each finding as a comment that opens with `**P1** <title>`, so the default
+`--finding-pattern` of the check counts it. Name the posting identity in the check with `--bot`.
+Posting needs `BITBUCKET_TOKEN` with write access to pull requests. A finding is skipped when a
+comment on the PR already opens with the same line, so running the review twice does not post
+twice. Other flags: `--language`, `--max-findings`, `--max-diff-bytes`, `--timeout`.
+
+What keeps an untrusted PR from steering the review:
+
+- The agent runs in an empty temporary directory with its tools off (Claude), read-only and in
+  `ask` mode with a sandbox (Cursor), or in a read-only sandbox (Codex). It sees the prompt only.
+- Its environment has no `BITBUCKET_*` variable, so it never holds the token that can comment.
+  Posting is done by this tool, never by the agent.
+- The title, description and diff sit between markers that are random on every run, and the agent
+  is told they are data to review, not instructions. This lowers the risk; it does not remove it.
+  An author can still word a diff to talk a model into reporting nothing, so a clean review is
+  not proof that a PR is safe.
+- Anything the agent writes is treated as text: `@` mentions and Markdown images are defused before
+  posting, and each field is length-limited. An answer that is not the expected JSON posts nothing.
+- A diff over `--max-diff-bytes` (default 300000) is refused, not cut: a review of part of a PR
+  would read as a review of all of it.
+
+Limits observed on a real machine:
+
+- Codex's model catalog lists models that a ChatGPT login rejects (`model_not_found`). Setup's
+  one-word request catches this and saves nothing. Every Codex model tried here was rejected, so a
+  full Codex run has not been seen to succeed.
+- For Cursor, a slug with no effort token (`gpt-5.3-codex`, `auto`, `composer-2.5`) is used as it
+  is, whatever the budget.
+- `--post` has not been run against a real PR.
+
 ## Choices to check
 
 The rules leave room for interpretation. These are the choices made here; each is easy to change.
@@ -169,7 +250,8 @@ The workflow diagram is PlantUML. After changing `docs/workflow.puml`, render it
 `plantuml -tpng docs/workflow.puml` (Graphviz is required).
 
 No runtime dependencies. The checks are pure functions over data (`src/checks.ts`); `src/bitbucket.ts`
-is the only module that talks to the network.
+is the only module that talks to Bitbucket, and `src/llm/` is the only one that starts the agent
+CLIs.
 
 ## License
 

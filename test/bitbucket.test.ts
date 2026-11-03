@@ -33,7 +33,9 @@ describe("getPullRequest", () => {
         ? json({
             id: 7,
             title: "Fix",
+            description: "Details",
             author: { uuid: "{u}", display_name: "Alice", nickname: "alice" },
+            source: { commit: { hash: "33c9a36c25ed" } },
             destination: { commit: { hash: "c1534197bde1" } },
           })
         : undefined,
@@ -44,14 +46,16 @@ describe("getPullRequest", () => {
     assert.deepEqual(pr, {
       id: 7,
       title: "Fix",
+      description: "Details",
       author: { uuid: "{u}", name: "Alice", nickname: "alice" },
+      sourceCommit: "33c9a36c25ed",
       destinationCommit: "c1534197bde1",
     });
   });
 
   it("reports a PR without a destination commit", async () => {
-    const { fetchImpl } = fakeFetch(() => json({ id: 7, title: "x", destination: { commit: null } }));
-    await assert.rejects(createBitbucket({ fetch: fetchImpl }).getPullRequest(REF), /no destination commit/);
+    const { fetchImpl } = fakeFetch(() => json({ id: 7, title: "x", source: { commit: { hash: "a" } }, destination: { commit: null } }));
+    await assert.rejects(createBitbucket({ fetch: fetchImpl }).getPullRequest(REF), /no source or destination commit/);
   });
 });
 

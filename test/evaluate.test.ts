@@ -37,7 +37,14 @@ function fakeBitbucket(world: World) {
   const bitbucket: Bitbucket = {
     async getPullRequest() {
       calls.push("pr");
-      return { id: REF.id, title: "Change", author: { uuid: "{author}", name: "Alice" }, destinationCommit: "dest123" };
+      return {
+        id: REF.id,
+        title: "Change",
+        description: "",
+        author: { uuid: "{author}", name: "Alice" },
+        sourceCommit: "src123",
+        destinationCommit: "dest123",
+      };
     },
     async getFileChanges(ref) {
       calls.push(`changes:${ref.id}`);
