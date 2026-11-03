@@ -145,7 +145,7 @@ logged in to, headless.
 | `claude` | `claude` | Cannot be listed; aliases are suggested (`opus`, `sonnet`, `haiku`, ...) | `--effort` |
 | `cursor` | `agent` | `agent --list-models` | The effort is part of the model slug (`grok-4.7-xhigh`), so the budget swaps the slug |
 | `codex` | `codex` | `codex debug models` | `-c model_reasoning_effort=...`, clamped to what the model supports |
-| `pi` | `pi` | `pi --list-models`, as `provider/model` | `--thinking`; a model without thinking gets no effort |
+| `pi` | `pi` | `pi --list-models` (extensions included), as `provider/model` | `--thinking`; a model without thinking gets no effort |
 | `muse` | `muse` | Cannot be listed; `muse-spark-1.3` is suggested | `--reasoning-effort` |
 
 ### Choosing the model: `small-change model setup`
@@ -192,9 +192,14 @@ twice. Other flags: `--language`, `--max-findings`, `--max-diff-bytes`, `--timeo
 What keeps an untrusted PR from steering the review:
 
 - The agent runs in an empty temporary directory with its tools off (Claude, Pi), read-only and in
-  `ask` mode with a sandbox (Cursor), in a read-only sandbox (Codex), or with shell, file writes,
-  web tools and questions off in the bare `empty` preset (Muse). Pi also runs with its extensions,
-  skills, context files and MCP servers off. It sees the prompt only.
+  `ask` mode with a sandbox (Cursor), in a read-only sandbox (Codex), or with `--yolo` but shell,
+  file writes, web tools and questions switched off in the bare `empty` preset (Muse). Pi also
+  runs with skills, context files and MCP servers off. It is given the prompt only.
+- Pi and Muse are the exception to "sandboxed". Pi runs as the local install is set up, so its
+  extensions load, and Muse runs with `--yolo`, which turns off its approval prompts and sandbox.
+  What holds them back is the tool-off flags, not a sandbox. One file read was tried on each, a
+  file inside the workspace and one outside it: neither Pi (through `claude-bridge`) nor Muse read
+  it. Two attempts are not proof that no tool call can get through.
 - Its environment has no `BITBUCKET_*` variable, so it never holds the token that can comment.
   Posting is done by this tool, never by the agent.
 - The title, description and diff sit between markers that are random on every run, and the agent
@@ -211,10 +216,12 @@ Limits observed on a real machine:
 - Codex's model catalog lists models that a ChatGPT login rejects (`model_not_found`). Setup's
   one-word request catches this and saves nothing. Every Codex model tried here was rejected, so a
   full Codex run has not been seen to succeed.
-- Pi runs with extensions off, so a model that only an extension provides (a `claude-bridge`
-  provider, for example) is not available. A model can still be listed and fail: here,
-  `cursorapi/composer-2.5` was listed and answered `Connection error`, and the one-word request
-  refused to save it.
+- Pi loads the local extensions, so `claude-bridge/*` models work. That provider starts Claude Code
+  with `permissionMode: "bypassPermissions"` and does not ignore the user's own Claude settings, as
+  the `claude` provider does: a plugin's note about its memory log showed up in one answer. Use
+  `--provider claude` when a clean Claude run matters more than going through Pi.
+- A model can be listed and still fail: `cursorapi/composer-2.5` was listed by Pi and answered
+  `Connection error`, and the one-word request refused to save it.
 - Muse has no command to list models and accepts any model id in `model-profile`, so only a
   request tells whether a model works: `muse-spark-1.3` did here, `muse-wonder-1.0` was refused
   for this account. Muse still loads the user's installed skills (115 here) into the run, even with

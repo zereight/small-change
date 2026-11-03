@@ -6,11 +6,12 @@ import type { Provider } from "./types.ts";
 import { DEFAULT_MODEL } from "./types.ts";
 
 /**
- * Muse Code, run headless with `muse exec --json` in the bare `empty` preset, with shell, file
- * writes, web tools and questions off, no session log, and none of the user's other tools' rules
- * or skills. The prompt goes in a file outside the workspace, and the answer is read from the run's
- * final event. The CLI has no way to list models, so the one that is known to work is suggested
- * and a probe run checks any other choice.
+ * Muse Code, run headless with `muse exec --json --yolo` (no approval prompts, no sandbox) in the
+ * bare `empty` preset, with shell, file writes, web tools and questions still switched off, no
+ * session log, and none of the user's other tools' rules or skills. The prompt goes in a file
+ * outside the workspace, and the answer is read from the run's final event. The CLI has no way to
+ * list models, so the one that is known to work is suggested and a probe run checks any other
+ * choice.
  */
 export const muse: Provider = {
   id: "muse",
@@ -31,6 +32,7 @@ export const muse: Provider = {
       const args = [
         "exec",
         "--json",
+        "--yolo",
         "--prompt-file",
         promptFile,
         "--workspace",

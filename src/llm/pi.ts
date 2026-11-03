@@ -3,10 +3,10 @@ import type { ModelInfo, Provider } from "./types.ts";
 import { DEFAULT_MODEL } from "./types.ts";
 
 /**
- * The `pi` coding agent, run headless with `-p`: every tool, extension, skill, prompt template,
- * context file and MCP server off, no saved session, and the prompt on stdin. Extensions are off
- * so that none of them can act on the PR's text, which also means the models that only an
- * extension provides (a `claude-bridge` provider, say) are not available here. A model is
+ * The `pi` coding agent, run headless with `-p` as the local install is set up: its extensions
+ * load, so the models that only an extension provides (a `claude-bridge` provider, say) can be
+ * used. What stays off is what the review has no use for: tools, skills, prompt templates,
+ * context files and MCP servers, and no session is saved. The prompt goes on stdin. A model is
  * `provider/model`, as in `pi --list-models`.
  */
 export const pi: Provider = {
@@ -16,7 +16,7 @@ export const pi: Provider = {
   effortStyle: "flag",
   isInstalled: (exec) => canRun(exec, "pi"),
   async listModels(exec) {
-    const result = await exec("pi", [...ISOLATION, "--list-models"], { timeoutMs: 60_000 });
+    const result = await exec("pi", ["--list-models"], { timeoutMs: 60_000 });
     if (result.code !== 0) {
       throw new Error(`pi --list-models exited with ${result.code}: ${stderrTail(result.stderr)}`);
     }
@@ -26,7 +26,7 @@ export const pi: Provider = {
   async run(exec, request) {
     const args = [
       "-p",
-      ...ISOLATION,
+      ...HEADLESS,
       ...(request.model === DEFAULT_MODEL ? [] : ["--model", request.model]),
       ...(request.effort === undefined ? [] : ["--thinking", request.effort]),
     ];
@@ -48,11 +48,10 @@ export const pi: Provider = {
   },
 };
 
-/** What turns off everything in Pi that could act on, or add to, the prompt. */
-const ISOLATION = [
+/** What turns off the parts of Pi that a one-shot review does not use. */
+const HEADLESS = [
   "--no-tools",
   "--no-session",
-  "--no-extensions",
   "--no-skills",
   "--no-context-files",
   "--no-prompt-templates",

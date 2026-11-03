@@ -217,18 +217,18 @@ describe("pi", () => {
     assert.deepEqual(parsePiModels("Error: nothing\n"), []);
   });
 
-  it("lists models with every extension off, from stdout only", async () => {
+  it("lists models from stdout only, with the local install's extensions loaded", async () => {
     const { exec, calls } = recording(async () => ({ code: 0, stdout: LIST, stderr: 'Warning: No models match pattern "x/y"' }));
     assert.equal((await pi.listModels(exec))?.length, 3);
-    assert.ok(calls[0]?.args.includes("--no-extensions") && calls[0].args.at(-1) === "--list-models");
+    assert.deepEqual(calls[0]?.args, ["--list-models"]);
   });
 
-  it("runs with tools, extensions, skills, context files and MCP off, and the prompt on stdin", async () => {
+  it("runs with tools, skills, context files and MCP off but extensions on, and the prompt on stdin", async () => {
     const { exec, calls } = recording(async () => ({ code: 0, stdout: "answer\n", stderr: "" }));
-    assert.equal(await pi.run(exec, { ...REQUEST, model: "opencode-go/claude-haiku-5-5", effort: "high" }), "answer");
+    assert.equal(await pi.run(exec, { ...REQUEST, model: "claude-bridge/claude-haiku-5-5", effort: "high" }), "answer");
     assert.deepEqual(calls[0]?.args, [
-      "-p", "--no-tools", "--no-session", "--no-extensions", "--no-skills", "--no-context-files",
-      "--no-prompt-templates", "--no-themes", "--no-mcp", "--model", "opencode-go/claude-haiku-5-5", "--thinking", "high",
+      "-p", "--no-tools", "--no-session", "--no-skills", "--no-context-files",
+      "--no-prompt-templates", "--no-themes", "--no-mcp", "--model", "claude-bridge/claude-haiku-5-5", "--thinking", "high",
     ]);
     assert.equal(calls[0]?.options?.input, "Review this");
     assert.equal(calls[0]?.options?.cwd, "/tmp/empty");
@@ -271,7 +271,7 @@ describe("muse", () => {
     assert.deepEqual(parseMuseOutput(""), { ok: false });
   });
 
-  it("runs bare, with shell, writes, web and questions off, and the prompt in a file outside the workspace", async () => {
+  it("runs with --yolo but shell, writes, web and questions off, and the prompt in a file outside the workspace", async () => {
     let promptFile = "";
     let promptText = "";
     const { exec, calls } = recording(async (args) => {
@@ -281,7 +281,7 @@ describe("muse", () => {
     });
     assert.equal(await muse.run(exec, { ...REQUEST, model: "muse-spark-1.3", effort: "low" }), "answer");
     const args = calls[0]?.args ?? [];
-    for (const flag of ["--json", "--no-session-log", "--disable-shell", "--disable-write", "--disable-web-tools", "--disable-request-user-input", "--disable-reminders", "--no-foreign-personal-context"]) {
+    for (const flag of ["--json", "--yolo", "--no-session-log", "--disable-shell", "--disable-write", "--disable-web-tools", "--disable-request-user-input", "--disable-reminders", "--no-foreign-personal-context"]) {
       assert.ok(args.includes(flag), flag);
     }
     assert.equal(args[args.indexOf("--preset") + 1], "empty");
