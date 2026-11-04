@@ -21,6 +21,13 @@ export interface Quote {
   quote: string;
 }
 
+/** The title and condition of a finding said again in another language. */
+export interface Translation {
+  language: string;
+  title: string;
+  condition?: string;
+}
+
 export interface Finding {
   severity: Severity;
   title: string;
@@ -28,6 +35,8 @@ export interface Finding {
   basis: Basis;
   /** The exact input or state sequence that triggers the defect. */
   condition?: string;
+  /** The title and condition in the other languages that were asked for, in that order. */
+  translations?: Translation[];
   /** Where the defect is, in the new version of the file. */
   path?: string;
   line?: number;
@@ -71,7 +80,13 @@ const MAX_QUOTES = 3;
  * a code fence or after some prose. Entries that are not findings are dropped and counted rather
  * than failing the whole answer. A P1 or P2 that is not proven is lowered, never kept as it was.
  */
-export function parseFindings(answer: string, maxFindings: number, check: QuoteChecker): ParsedFindings {
+export function parseFindings(
+  answer: string,
+  maxFindings: number,
+  check: QuoteChecker,
+  /** The languages besides the first, which a finding may carry a translation in. */
+  translateTo: readonly string[] = [],
+): ParsedFindings {
   const parsed = extractJson(answer);
   const entries = Array.isArray(parsed)
     ? parsed
@@ -86,7 +101,7 @@ export function parseFindings(answer: string, maxFindings: number, check: QuoteC
   const valid: Finding[] = [];
   let dropped = 0;
   for (const entry of entries) {
-    const finding = toFinding(entry);
+    const finding = toFinding(entry, translateTo);
     if (finding === undefined) {
       dropped++;
       continue;
@@ -177,11 +192,11 @@ export function extractJson(answer: string): unknown {
   throw new FindingsError(`The answer is not JSON: ${preview || "(empty)"}`);
 }
 
-function toFinding(entry: unknown): Finding | undefined {
+function toFinding(entry: unknown, translateTo: readonly string[]): Finding | undefined {
   if (typeof entry !== "object" || entry === null) {
     return undefined;
   }
-  const { severity, title, detail, path, line, basis, condition, evidence, firing } = entry as Record<string, unknown>;
+  const { severity, title, detail, path, line, basis, condition, evidence, firing, translations } = entry as Record<string, unknown>;
   const level = typeof severity === "string" ? severity.trim().toUpperCase() : "";
   if (!(SEVERITIES as readonly string[]).includes(level)) {
     return undefined;
@@ -215,7 +230,37 @@ function toFinding(entry: unknown): Finding | undefined {
   if (firingQuote !== undefined) {
     finding.firing = firingQuote;
   }
+  const translated = toTranslations(translations, translateTo);
+  if (translated.length > 0) {
+    finding.translations = translated;
+  }
   return finding;
+}
+
+/** The translations the answer gave in the languages asked for, one per language, in the order asked. */
+function toTranslations(value: unknown, languages: readonly string[]): Translation[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const wanted = new Map(languages.map((language) => [language.toLowerCase(), language]));
+  const found = new Map<string, Translation>();
+  for (const item of value) {
+    if (typeof item !== "object" || item === null) {
+      continue;
+    }
+    const { language, title, condition } = item as Record<string, unknown>;
+    const name = typeof language === "string" ? wanted.get(language.trim().toLowerCase()) : undefined;
+    const text = typeof title === "string" ? clip(title.replace(/\s+/g, " ").trim(), MAX_TITLE) : "";
+    if (name === undefined || text === "" || found.has(name)) {
+      continue;
+    }
+    found.set(name, {
+      language: name,
+      title: text,
+      ...(typeof condition === "string" && condition.trim() !== "" ? { condition: clip(condition.trim(), MAX_CONDITION) } : {}),
+    });
+  }
+  return languages.flatMap((language) => found.get(language) ?? []);
 }
 
 /** A quote is an object with a `quote`, or a bare string standing for a quote in the finding's file. */

@@ -16,7 +16,9 @@ Arguments:
 Options:
   --post                   Post each finding as a comment on the pull request
                            (needs BITBUCKET_TOKEN with write access to pull requests)
-  --language <name>        The language of the findings (default: English)
+  --language <names>       The languages of the comments, comma separated, at most 3. The first is the one
+                           the model writes in and the output uses; the others are translations of each
+                           comment's title and condition (default: English,Korean)
   --max-findings <n>       Report at most n findings (default: 10)
   --max-diff-bytes <n>     Refuse a diff larger than n bytes (default: 300000)
   --context-bytes <n>      Show at most n bytes of the changed files' code besides the diff, so that
@@ -72,10 +74,7 @@ export function parseReviewArgs(argv: string[]): ReviewCommand {
       `Invalid PR URL: "${url}". Expected https://bitbucket.org/<workspace>/<repo>/pull-requests/<id>`,
     );
   }
-  const language = values.language?.trim();
-  if (language !== undefined && (language === "" || /[\r\n]/.test(language) || language.length > 40)) {
-    throw new UsageError(`Invalid --language "${values.language}": expected a short language name`);
-  }
+  const languages = parseLanguages(values.language);
   const search = values.search ?? "auto";
   if (search !== "off" && search !== "auto" && !isSearchId(search)) {
     throw new UsageError(`Invalid --search "${search}": expected ${[...SEARCH_IDS, "auto", "off"].join(", ")}`);
@@ -90,7 +89,7 @@ export function parseReviewArgs(argv: string[]): ReviewCommand {
       verifier: values.verifier ?? true,
       search,
       maxLookups: positive(values["max-lookups"], "--max-lookups") ?? 8,
-      language: language ?? "English",
+      languages,
       maxFindings: positive(values["max-findings"], "--max-findings") ?? 10,
       maxDiffBytes: positive(values["max-diff-bytes"], "--max-diff-bytes") ?? 300_000,
       contextBytes: nonNegative(values["context-bytes"], "--context-bytes") ?? 120_000,
@@ -143,4 +142,26 @@ function positive(value: string | undefined, flag: string): number | undefined {
     throw new UsageError(`Invalid ${flag} "${value}": expected a positive integer`);
   }
   return number;
+}
+
+const MAX_LANGUAGES = 3;
+
+/** `English,Korean` as a list, without repeats (case aside); the default is English then Korean. */
+function parseLanguages(value: string | undefined): string[] {
+  if (value === undefined) {
+    return ["English", "Korean"];
+  }
+  const names: string[] = [];
+  for (const name of value.split(",").map((part) => part.trim())) {
+    if (name === "" || /[\r\n"]/.test(name) || name.length > 40) {
+      throw new UsageError(`Invalid --language "${value}": expected short language names separated by commas`);
+    }
+    if (!names.some((known) => known.toLowerCase() === name.toLowerCase())) {
+      names.push(name);
+    }
+  }
+  if (names.length > MAX_LANGUAGES) {
+    throw new UsageError(`Invalid --language "${value}": at most ${MAX_LANGUAGES} languages`);
+  }
+  return names;
 }

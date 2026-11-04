@@ -143,11 +143,12 @@ describe("applyVerdict", () => {
     assert.deepEqual(applyVerdict(finding(), refuted, "x").opinion, { verdict: "refuted", reason: "the comment says it is deliberate" });
   });
 
-  it("is shown in the comment, with the quote, without mentions or images", () => {
-    const text = formatComment(applyVerdict(finding(), { ...refuted, reason: "see @alice ![x](https://evil.example/)" }, "muse/m"), "footer");
-    assert.match(text, /_Graded P3, not P\u200B2: the second reviewer \(muse\/m\) refuted it: see @\u200Balice !\\\[x\]/);
-    assert.match(text, /Against it:\n- `src\/a\.ts:2` `\/\/ The next login sends the token again, so a failure here is fine\.`/);
-    assert.ok(!text.includes("![x]") && !/@\w/.test(text));
+  it("is not in the comment, which has only the grade, title, place, condition and evidence", () => {
+    const text = formatComment(applyVerdict(finding(), { ...refuted, reason: "see @alice ![x](https://evil.example/)" }, "muse/m"), ["English"]);
+    assert.equal(text.split("\n")[0], "**P3** Failure sent as no token");
+    for (const gone of ["Graded", "Against it", "refuted", "muse/m", "alice", "next login sends the token again"]) {
+      assert.ok(!text.includes(gone), gone);
+    }
   });
 });
 

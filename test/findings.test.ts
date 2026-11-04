@@ -203,51 +203,104 @@ describe("parseFindings: grading", () => {
 
 describe("comment", () => {
   const base: Finding = { severity: "P2", title: "Null deref", detail: "Fix it", basis: "code", path: "src/a.ts", line: 9, evidence: [] };
+  const EN = ["English"];
+  const BOTH = ["English", "Korean"];
+  const full: Finding = {
+    ...base,
+    condition: "items has one element",
+    evidence: [{ path: "src/a.ts", line: 2, quote: "const total = items.length - 1;" }],
+    translations: [{ language: "Korean", title: "널 역참조", condition: "items에 원소가 하나뿐일 때" }],
+  };
 
   it("starts with the grade so small-change's default pattern counts P1 and P2 but not a question", () => {
-    const text = formatComment(base, "small-change review");
+    const text = formatComment(base, EN);
     assert.equal(text.split("\n")[0], "**P2** Null deref");
     assert.match(text.split("\n")[0] as string, /\bP[12]\b/);
-    assert.ok(text.includes("`src/a.ts:9`") && text.endsWith("_small-change review_"));
-    assert.doesNotMatch(formatComment({ ...base, severity: "ASK" }, "f").split("\n")[0] as string, /\bP[12]\b/);
+    assert.ok(text.includes("`src/a.ts:9`"));
+    assert.doesNotMatch(formatComment({ ...base, severity: "ASK" }, EN).split("\n")[0] as string, /\bP[12]\b/);
   });
 
-  it("shows the condition, the evidence, the firing and why it was graded lower", () => {
+  it("is only the grade, the title, the place, the condition and the evidence, in English and Korean", () => {
+    assert.equal(
+      formatComment(full, BOTH),
+      [
+        "**P2** Null deref\n널 역참조",
+        "`src/a.ts:9`",
+        "Condition: items has one element\n조건: items에 원소가 하나뿐일 때",
+        "Evidence / 증거:\n- `src/a.ts:2` `const total = items.length - 1;`",
+      ].join("\n\n"),
+    );
+  });
+
+  it("leaves out everything else: the detail, the firing, the grading history, the counter quote and a footer", () => {
     const text = formatComment(
       {
-        ...base,
-        severity: "P3",
-        condition: "items has one element",
-        evidence: [{ path: "src/a.ts", line: 2, quote: "const total = items.length - 1;" }],
+        ...full,
+        detail: "THE DETAIL",
         firing: { quote: "throw new Error(`boom`)" },
         lowered: { from: "P1", reason: "no trigger condition was given" },
+        counter: { path: "b.ts", line: 2, quote: "COUNTER" },
+        opinion: { verdict: "refuted", reason: "OPINION" },
       },
-      "f",
+      BOTH,
     );
-    assert.match(text, /Condition: items has one element/);
-    assert.match(text, /- `src\/a\.ts:2` `const total = items\.length - 1;`/);
-    assert.match(text, /Firing:\n- `throw new Error\('boom'\)`/);
-    assert.match(text, /_Graded P3, not P\u200B1: no trigger condition was given\._/);
+    for (const gone of ["THE DETAIL", "Firing", "Graded", "no trigger condition", "Against it", "COUNTER", "OPINION", "small-change review", "commit", "looked up", "checked by"]) {
+      assert.ok(!text.includes(gone), gone);
+    }
+  });
+
+  it("leaves out a part the finding does not have, and keeps a translation that is missing out of it", () => {
+    assert.equal(formatComment(base, BOTH), "**P2** Null deref\n\n`src/a.ts:9`");
+    assert.equal(formatComment({ ...base, condition: "c" }, BOTH), "**P2** Null deref\n\n`src/a.ts:9`\n\nCondition: c");
+    const onlyTranslated = formatComment({ ...base, translations: [{ language: "Korean", title: "제목" }] }, BOTH);
+    assert.equal(onlyTranslated, "**P2** Null deref\n제목\n\n`src/a.ts:9`");
+  });
+
+  it("puts the labels in each language, and English ones for a language it has none for", () => {
+    const ja = formatComment(
+      { ...base, condition: "c", evidence: [{ quote: "x" }], translations: [{ language: "Japanese", title: "ヌル", condition: "条件" }] },
+      ["English", "Japanese"],
+    );
+    assert.match(ja, /Condition: c\nCondition: 条件/);
+    assert.match(ja, /\n\nEvidence:\n- `x`$/);
+    const korean = formatComment({ ...base, condition: "c", evidence: [{ quote: "x" }] }, ["korean"]);
+    assert.match(korean, /조건: c/);
+    assert.match(korean, /증거:/);
+  });
+
+  it("uses only the translations in the languages asked for, in that order", () => {
+    const text = formatComment(
+      { ...base, translations: [{ language: "Japanese", title: "J" }, { language: "Korean", title: "K" }] },
+      ["English", "Korean"],
+    );
+    assert.equal(text.split("\n").slice(0, 2).join("|"), "**P2** Null deref|K");
+    assert.ok(!text.includes("J"));
   });
 
   describe("the default finding pattern, which the check applies to the whole comment", () => {
     const pattern = /\bP[12]\b/i;
-    const lowered = { from: "P1" as const, reason: "the second reviewer (claude/opus) refuted it: this is not a P2 and not a P1" };
 
-    it("does not count a P3 or a question, however they came to be graded so", () => {
+    it("does not count a P3 or a question, whatever their text names", () => {
       for (const severity of ["P3", "ASK"] as const) {
         const text = formatComment(
-          { ...base, severity, title: "Not a P1", detail: "A P2 would need more", condition: "if P1 happens", evidence: [{ path: "a.ts", line: 1, quote: "const P1 = 2;" }], lowered, counter: { path: "b.ts", line: 2, quote: "// P2 is fine" } },
-          "small-change review · muse/m · commit abc",
+          {
+            ...base,
+            severity,
+            title: "Not a P1",
+            condition: "if P1 happens",
+            evidence: [{ path: "a.ts", line: 1, quote: "const P1 = 2;" }],
+            translations: [{ language: "Korean", title: "P2가 아님", condition: "P1이 일어나면" }],
+          },
+          BOTH,
         );
         assert.doesNotMatch(text, pattern, severity);
-        assert.match(text.replace(/\u200B/g, ""), /_Graded \w+, not P1: the second reviewer .*not a P2 and not a P1\._/, "reads the same without the invisible character");
+        assert.match(text.replace(/\u200B/g, ""), /Not a P1\nP2가 아님/, "reads the same without the invisible character");
       }
     });
 
     it("counts a P1 or P2 by its headline, and leaves the words of its text alone", () => {
       for (const severity of ["P1", "P2"] as const) {
-        const text = formatComment({ ...base, severity, detail: "like the P1 before" }, "f");
+        const text = formatComment({ ...base, severity, condition: "like the P1 before" }, EN);
         assert.match(text.split("\n")[0] as string, pattern);
         assert.ok(text.includes("like the P1 before"));
       }
@@ -255,31 +308,88 @@ describe("comment", () => {
 
     it("keeps the same headline for skipping a repeat when a P3's title names a grade", () => {
       const a = { ...base, severity: "P3" as const, title: "Was P1, now minor" };
-      assert.equal(formatComment(a, "f").split("\n")[0], headline(a));
+      assert.equal(formatComment(a, EN).split("\n")[0], headline(a));
       assert.doesNotMatch(headline(a), pattern);
     });
   });
 
   it("neutralizes mentions and images in every field, and cannot leave a code span", () => {
     const text = formatComment(
-      { ...base, title: "ping @alice", detail: "see ![x](https://evil.example/?q=1) and @{uuid-1234}", condition: "by @bob", evidence: [{ quote: "a `b` @carol ![i](u)" }] },
-      "f",
+      {
+        ...base,
+        title: "ping @alice",
+        condition: "by @bob",
+        evidence: [{ quote: "a `b` @carol ![i](u)" }],
+        translations: [{ language: "Korean", title: "@dave ![y](https://evil.example/)", condition: "@erin" }],
+      },
+      BOTH,
     );
     assert.ok(!/@\w/.test(text) && !text.includes("@{"));
-    assert.ok(!text.includes("![x]") && !text.includes("![i]"));
+    assert.ok(!text.includes("![y]") && !text.includes("![i]"));
     assert.match(text, /`a 'b' @\u200Bcarol !\\\[i\]\(u\)`/);
   });
 
   it("gives the same headline to the same finding, for skipping a repeat", () => {
-    const a = { ...base, title: "Same @bob", detail: "one" };
-    const b = { ...base, title: "Same @bob", detail: "two" };
+    const a = { ...base, title: "Same @bob", condition: "one" };
+    const b = { ...base, title: "Same @bob", condition: "two" };
     assert.equal(headline(a), headline(b));
-    assert.equal(formatComment(a, "f").split("\n")[0], headline(a));
+    assert.equal(formatComment(a, EN).split("\n")[0], headline(a));
+  });
+});
+
+describe("parseFindings: translations", () => {
+  const check = () => true;
+  const answer = (translations: unknown) =>
+    JSON.stringify({ findings: [{ severity: "P3", title: "Nit", detail: "", translations }] });
+
+  it("keeps one translation per language asked for, in the order asked, and drops the rest", () => {
+    const parsed = parseFindings(
+      answer([
+        { language: "Japanese", title: "J", condition: "jc" },
+        { language: "korean", title: "  한국어  제목 ", condition: " 조건 " },
+        { language: "Korean", title: "second Korean" },
+        { language: "French", title: "F" },
+        { language: "Japanese", title: "" },
+        "Korean",
+        null,
+      ]),
+      10,
+      check,
+      ["Korean", "Japanese"],
+    );
+    assert.deepEqual(parsed.findings[0]?.translations, [
+      { language: "Korean", title: "한국어 제목", condition: "조건" },
+      { language: "Japanese", title: "J", condition: "jc" },
+    ]);
+  });
+
+  it("leaves the field out when there is none, when none is asked for, or when it is not a list", () => {
+    assert.equal(parseFindings(answer([{ language: "Korean", title: "K" }]), 10, check).findings[0]?.translations, undefined);
+    assert.equal(parseFindings(answer("Korean: K"), 10, check, ["Korean"]).findings[0]?.translations, undefined);
+    assert.equal(parseFindings(answer(undefined), 10, check, ["Korean"]).findings[0]?.translations, undefined);
+    assert.equal(parseFindings(answer([{ language: "Korean", title: "K" }]), 10, check, ["Korean"]).findings[0]?.translations?.[0]?.condition, undefined);
+  });
+});
+
+describe("buildPrompt: languages", () => {
+  const input = { title: "T", description: "D", diff: "diff --git a b", maxFindings: 7, nonce: "n0nce" };
+
+  it("asks for a translation of the title and condition in each language after the first", () => {
+    const prompt = buildPrompt({ ...input, languages: ["English", "Korean", "Japanese"] });
+    assert.match(prompt, /in English\./);
+    assert.match(prompt, /for each of Korean, Japanese/);
+    assert.ok(prompt.includes('"translations":[{"language":"Korean","title":"...","condition":"..."}]'));
+  });
+
+  it("asks for no translations when there is one language", () => {
+    const prompt = buildPrompt({ ...input, languages: ["Korean"] });
+    assert.match(prompt, /in Korean\./);
+    assert.doesNotMatch(prompt, /translations/);
   });
 });
 
 describe("buildPrompt", () => {
-  const input = { title: "T", description: "D", diff: "diff --git a b", language: "Korean", maxFindings: 7, nonce: "n0nce" };
+  const input = { title: "T", description: "D", diff: "diff --git a b", languages: ["Korean"], maxFindings: 7, nonce: "n0nce" };
   const file = { path: "src/c.ts", numbered: "1| a\n2| b", shown: "a\nb", ranges: "1-2", totalLines: 2, whole: true, truncated: false, bytes: 9 };
 
   it("fences the PR text and the code with the nonce and says it is data", () => {

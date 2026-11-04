@@ -8,43 +8,52 @@ export function headline(finding: Finding): string {
   return unblocking(finding, `**${finding.severity}** ${neutralize(finding.title)}`);
 }
 
-/**
- * The comment's Markdown: the headline, where in the diff, the detail, the condition and the
- * evidence that back it, why it was graded lower than the model first said (and the quote the
- * second reviewer used, if it refuted the finding), and who wrote it.
- */
-export function formatComment(finding: Finding, footer: string): string {
-  return unblocking(finding, comment(finding, footer));
-}
+/** The words the tool puts around the model's text. Another language gets the English ones. */
+const LABELS: Record<string, { condition: string; evidence: string }> = {
+  english: { condition: "Condition", evidence: "Evidence" },
+  korean: { condition: "조건", evidence: "증거" },
+};
+const labelsOf = (language: string) => LABELS[language.toLowerCase()] ?? (LABELS.english as { condition: string; evidence: string });
 
-function comment(finding: Finding, footer: string): string {
+/**
+ * The comment's Markdown, and nothing else: the grade and title, where in the diff, the condition
+ * that triggers it and the code that shows it. The title and the condition are given in each of
+ * `languages` (the first is the one the model wrote; the others are its translations, if it gave
+ * them). The detail, the grading history and who wrote it stay in the command's output.
+ */
+export function formatComment(finding: Finding, languages: readonly string[]): string {
+  const [first = "English", ...others] = languages;
+  const translations = others.flatMap((language) => finding.translations?.find((item) => item.language === language) ?? []);
   const where =
     finding.path === undefined
       ? undefined
       : `\`${finding.path.replace(/`/g, "'")}${finding.line === undefined ? "" : `:${finding.line}`}\``;
-  return [
-    headline(finding),
-    where,
-    finding.detail === "" ? undefined : neutralize(finding.detail),
-    finding.condition === undefined ? undefined : `Condition: ${neutralize(finding.condition)}`,
-    finding.evidence.length === 0 ? undefined : `Evidence:\n${finding.evidence.map(quoteLine).join("\n")}`,
-    finding.firing === undefined ? undefined : `Firing:\n${quoteLine(finding.firing)}`,
-    finding.lowered === undefined
-      ? undefined
-      : `_Graded ${finding.severity}, not ${finding.lowered.from}: ${neutralize(finding.lowered.reason)}._`,
-    finding.counter === undefined ? undefined : `Against it:\n${quoteLine(finding.counter)}`,
-    `_${footer}_`,
-  ]
-    .filter((part): part is string => part !== undefined)
-    .join("\n\n");
+  const conditions = [
+    finding.condition === undefined ? undefined : `${labelsOf(first).condition}: ${neutralize(finding.condition)}`,
+    ...translations.map((item) =>
+      item.condition === undefined ? undefined : `${labelsOf(item.language).condition}: ${neutralize(item.condition)}`,
+    ),
+  ].filter((line): line is string => line !== undefined);
+  const evidenceLabel = [...new Set(languages.map((language) => labelsOf(language).evidence))].join(" / ");
+  return unblocking(
+    finding,
+    [
+      [headline(finding), ...translations.map((item) => neutralize(item.title))].join("\n"),
+      where,
+      conditions.length === 0 ? undefined : conditions.join("\n"),
+      finding.evidence.length === 0 ? undefined : `${evidenceLabel}:\n${finding.evidence.map(quoteLine).join("\n")}`,
+    ]
+      .filter((part): part is string => part !== undefined)
+      .join("\n\n"),
+  );
 }
 
 /**
  * The check counts a comment by matching `\bP[12]\b` anywhere in it, not only in the headline. A
- * P3 or a question that says "Graded P3, not P1", or whose text mentions a P2, would then block the
- * merge it was lowered to avoid blocking. So in those comments an invisible character goes between
- * the P and the digit: it reads the same and the pattern no longer matches. P1 and P2 comments keep
- * their text, since their headline is what the check is meant to count.
+ * P3 or a question whose text names a grade ("this is not a P1") would then block the merge it was
+ * lowered to avoid blocking. So in those comments an invisible character goes between the P and
+ * the digit: it reads the same and the pattern no longer matches. P1 and P2 comments keep their
+ * text, since their headline is what the check is meant to count.
  */
 function unblocking(finding: Finding, text: string): string {
   return finding.severity === "P1" || finding.severity === "P2" ? text : text.replace(/\bP([12])\b/g, "P\u200B$1");

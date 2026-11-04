@@ -194,40 +194,40 @@ twice. Other flags: `--language`, `--max-findings`, `--max-diff-bytes`, `--conte
 
 ### What a comment looks like
 
-Each finding is one general comment on the PR. The parts that a finding does not have are left out.
+Each finding is one general comment on the PR, and it holds only the grade, the title, the place,
+the condition and the evidence, in English and Korean:
 
 ```markdown
-**P2** Session is refreshed on every login         <- the grade and a short title: always first
-`packages/app/src/session.ts:94`                  <- where, in the new version of the file
-What is wrong and how to fix it.                     <- the detail
+**P2** Session is refreshed on every login
+로그인할 때마다 세션이 갱신됨
 
-Condition: the user logs in twice without ...        <- the exact trigger (P1 and P2 need one)
+`packages/app/src/session.ts:94`
 
-Evidence:                                            <- quotes of the code, checked by this tool
+Condition: the user logs in twice without restarting the app
+조건: 앱을 다시 시작하지 않고 두 번 로그인할 때
+
+Evidence / 증거:
 - `packages/app/src/session.ts:94` `await refreshSession()`
-
-Firing:                                              <- only for a defect that needs an event to happen
-- `throw new Error('boom')`
-
-_Graded P3, not P1: the second reviewer (claude/opus) refuted it: ..._   <- only if the grade fell, and why
-
-Against it:                                          <- only if the second reviewer refuted it
-- `lib/other.kt:34` `import app.Settings`
-
-_small-change review · muse/muse-spark-1.3 · looked up with tgrep · checked by claude/opus · commit 6ccf83c34349_
 ```
 
-The last line says who wrote it: the reviewer (`provider/model`); `looked up with <engine>` only if
-the agent's lookups were answered; `checked by <provider/model>` only if a second model looked at a
-P1 or P2; and the 12 characters of the commit that was reviewed. The first line is also what keeps a
-rerun from posting twice. `@` mentions and Markdown images in the model's text are defused.
+A part that a finding does not have (the condition, the evidence, a translation) is left out. The
+detail, why a grade was lowered, what the second reviewer said, which model wrote it and which
+engine looked things up are not in the comment; they are in the output of `review` and in `--json`.
+The first line is also what keeps a rerun from posting twice. `@` mentions and Markdown images in
+the model's text are defused.
+
+`--language` takes up to three names separated by commas (default `English,Korean`). The reviewer
+writes in the first and adds a translation of each title and condition in the others; the labels
+are translated for Korean only and stay English for other languages. A finding the reviewer sent
+without a translation is posted in the first language, and the output says how many.
+`--language English` posts English only.
 
 The check counts a comment when `\bP[12]\b` matches anywhere in it, not only in the first line. A
-P3 or a question that says "Graded P3, not P1" would therefore be counted, and block the merge it was
-lowered to avoid blocking. In those comments the digit is written with an invisible character after
-the `P` (`P` + U+200B + `1`): it reads the same, and the pattern does not match. Comments posted
-before this was fixed still have the plain text; resolve them in Bitbucket, since resolved comments
-are not counted.
+P3 or a question whose text names a grade ("this is not a P1") would therefore be counted, and
+block the merge it was lowered to avoid blocking. In those comments the digit is written with an
+invisible character after the `P` (`P` + U+200B + `1`): it reads the same, and the pattern does not
+match. Comments posted before this was fixed still have the plain text, and some of them carry
+"Graded P3, not P1"; resolve them in Bitbucket, since resolved comments are not counted.
 
 ### What a P1 or P2 needs
 
@@ -265,10 +265,10 @@ With a verifier saved, every P1 and P2 the reviewer reports is shown to the seco
 with the same diff and code, and the job of refuting it. The verifier must answer for each finding
 with `upheld`, `refuted` or `unclear`. A refutation counts only with a reason and a `counter`
 quote that is found in what was shown, the same bar the finding itself had to clear; without it
-the verdict is `unclear`. A refuted finding is posted as a P3 that says who refuted it and why and
-shows the quote ("Against it"), so the author still sees it and can disagree; it just does not
-count for the check. The output shows what the verifier said about the ones that stayed
-(`second reviewer: unclear: ...`), and the comment footer names it (`checked by claude/opus`).
+the verdict is `unclear`. A refuted finding is posted as a P3, so it does not
+count for the check. The comment does not say who refuted it; the output of `review` does, with
+the reason and the quote, and so it does for the ones that stayed (`second reviewer: unclear: ...`)
+and for which model checked (`checked by claude/opus`).
 
 - Choose a model other than the reviewer's; the setup says so when they are the same. Use
   `--no-verifier` on a single `review` to skip it.

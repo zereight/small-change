@@ -67,14 +67,14 @@ describe("parseReviewArgs", () => {
       ref: { workspace: "team", repo: "repo", id: 12 },
       config: undefined,
       json: false,
-      options: { post: false, verifier: true, search: "auto", maxLookups: 8, language: "English", maxFindings: 10, maxDiffBytes: 300_000, contextBytes: 120_000, contextLines: 40, timeoutMs: 900_000 },
+      options: { post: false, verifier: true, search: "auto", maxLookups: 8, languages: ["English", "Korean"], maxFindings: 10, maxDiffBytes: 300_000, contextBytes: 120_000, contextLines: 40, timeoutMs: 900_000 },
     });
   });
 
   it("parses the flags", () => {
     const parsed = parseReviewArgs([URL, "--post", "--language", "Korean", "--max-findings", "3", "--max-diff-bytes", "5000", "--context-bytes", "0", "--context-lines", "10", "--timeout", "60", "--config", "/c"]);
     assert.ok(parsed.command === "review");
-    assert.deepEqual(parsed.options, { post: true, verifier: true, search: "auto", maxLookups: 8, language: "Korean", maxFindings: 3, maxDiffBytes: 5000, contextBytes: 0, contextLines: 10, timeoutMs: 60_000 });
+    assert.deepEqual(parsed.options, { post: true, verifier: true, search: "auto", maxLookups: 8, languages: ["Korean"], maxFindings: 3, maxDiffBytes: 5000, contextBytes: 0, contextLines: 10, timeoutMs: 60_000 });
     assert.equal(parsed.config, "/c");
   });
 
@@ -102,6 +102,18 @@ describe("parseReviewArgs", () => {
     assert.equal(parsed.options.verifier, false);
   });
 
+  it("reads --language as a list, without repeats, and the first is the one the model writes in", () => {
+    const languages = (...args: string[]) => {
+      const parsed = parseReviewArgs([URL, ...args]);
+      assert.ok(parsed.command === "review");
+      return parsed.options.languages;
+    };
+    assert.deepEqual(languages(), ["English", "Korean"]);
+    assert.deepEqual(languages("--language", "Korean, English"), ["Korean", "English"]);
+    assert.deepEqual(languages("--language", "English,english,Korean"), ["English", "Korean"]);
+    assert.deepEqual(languages("--language", "English,Korean,Japanese"), ["English", "Korean", "Japanese"]);
+  });
+
   it("rejects bad input", () => {
     assert.throws(() => parseReviewArgs([]), /Missing required argument/);
     assert.throws(() => parseReviewArgs(["https://example.com/x"]), /Invalid PR URL/);
@@ -111,6 +123,9 @@ describe("parseReviewArgs", () => {
     assert.throws(() => parseReviewArgs([URL, "--context-bytes", "1.5"]), /non-negative integer/);
     assert.throws(() => parseReviewArgs([URL, "--language", "a\nb"]), /Invalid --language/);
     assert.throws(() => parseReviewArgs([URL, "--language", ""]), /Invalid --language/);
+    assert.throws(() => parseReviewArgs([URL, "--language", "English,,Korean"]), /Invalid --language/);
+    assert.throws(() => parseReviewArgs([URL, "--language", 'a"b']), /Invalid --language/);
+    assert.throws(() => parseReviewArgs([URL, "--language", "A,B,C,D"]), /at most 3 languages/);
     assert.throws(() => parseReviewArgs([URL, URL]), /Unexpected extra/);
   });
 });

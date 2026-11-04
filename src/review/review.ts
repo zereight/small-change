@@ -26,8 +26,8 @@ export interface ReviewOptions {
   contextBytes: number;
   /** Lines of code shown around each change, when a file is too large to be shown whole. */
   contextLines: number;
-  /** The language the findings are written in. */
-  language: string;
+  /** The languages of the comments. The first is what the model writes in and the output uses; the others are translations of each comment's title and condition. */
+  languages: string[];
   /** Whether to post the findings as comments. */
   post: boolean;
   /** Whether to have the verifier try to refute the P1 and P2 findings, when one is configured. */
@@ -55,12 +55,14 @@ export interface ReviewDeps {
 
 export interface ReviewResult {
   pullRequest: { ref: PullRequestRef; title: string; sourceCommit: string };
-  /** `provider/model` as it appears in the comments' footer. */
+  /** `provider/model` of the reviewer. */
   reviewer: string;
   /** What the reviewer was shown besides the diff. */
   context: { enabled: boolean; files: number; bytes: number; omitted: ContextOmission[] };
   /** The findings after grading; a P1 or P2 that was not proven carries `lowered`. */
   findings: Finding[];
+  /** Findings that lack a translation in one of the languages asked for: their comment is not in every language. */
+  untranslated: number;
   /** Entries of the model's answer that were not findings. */
   dropped: number;
   /** Findings left out because of the limit. */
@@ -112,6 +114,7 @@ export async function runReview(
     reviewer,
     context: { enabled: options.contextBytes > 0, files: 0, bytes: 0, omitted: [] },
     findings: [],
+    untranslated: 0,
     dropped: 0,
     omitted: 0,
     posted: [],
@@ -181,14 +184,14 @@ export async function runReview(
           ...material,
           lookups,
           ...(lookup === undefined ? {} : { lookup }),
-          language: options.language,
+          languages: options.languages,
           maxFindings: options.maxFindings,
         }),
     });
     result.timings.reviewerMs = performance.now() - reviewerStarted;
     // Built when needed: what the agents were shown by lookups grows as they ask.
     const check = () => buildQuoteChecker(diffFiles, [...context.files, ...shownByLookups(session)]);
-    const parsed = parseFindings(answer, options.maxFindings, check());
+    const parsed = parseFindings(answer, options.maxFindings, check(), options.languages.slice(1));
     result.findings = parsed.findings;
     result.dropped = parsed.dropped;
     result.omitted = parsed.omitted;
@@ -213,7 +216,7 @@ export async function runReview(
               lookups,
               ...(lookup === undefined ? {} : { lookup }),
               candidates,
-              language: options.language,
+              language: options.languages[0] ?? "English",
             }),
         });
         verdicts = parseVerdicts(reply, candidates, check());
@@ -241,10 +244,12 @@ export async function runReview(
     verifier: result.verification === undefined ? 0 : 1 + (result.lookups?.asked.verifier ?? 0),
   };
 
+  const others = options.languages.slice(1);
+  result.untranslated = result.findings.filter((finding) =>
+    others.some((language) => finding.translations?.every((item) => item.language !== language) ?? true),
+  ).length;
+
   if (options.post && result.findings.length > 0) {
-    const checkedBy = result.verification === undefined ? "" : ` · checked by ${result.verification.by}`;
-    const lookedUp = result.lookups === undefined || result.lookups.requests === 0 ? "" : ` · looked up with ${result.lookups.label}`;
-    const footer = `small-change review · ${reviewer}${lookedUp}${checkedBy} · commit ${pullRequest.sourceCommit}`;
     const existing = (await bitbucket.getComments(ref)).map((comment) => comment.body.split("\n")[0]);
     for (const finding of result.findings) {
       if (existing.includes(headline(finding))) {
@@ -252,7 +257,7 @@ export async function runReview(
         continue;
       }
       try {
-        const commentId = await bitbucket.postComment(ref, formatComment(finding, footer));
+        const commentId = await bitbucket.postComment(ref, formatComment(finding, options.languages));
         result.posted.push({ finding, commentId });
       } catch (error) {
         throw new Error(
@@ -432,6 +437,9 @@ export function formatReview(result: ReviewResult, post: boolean): string {
     if (lowered > 0) {
       lines.push(`${lowered} of them were graded lower than the reviewer first said, because they were not proven or were refuted.`);
     }
+  }
+  if (result.untranslated > 0) {
+    lines.push(`${result.untranslated} finding(s) came without a translation in every language asked for, so their comment is not in all of them.`);
   }
   if (result.omitted > 0) {
     lines.push(`${result.omitted} more finding(s) were left out because of the limit.`);

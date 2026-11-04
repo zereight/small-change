@@ -16,7 +16,7 @@ const OPTIONS: ReviewOptions = {
   maxDiffBytes: 5000,
   contextBytes: 100_000,
   contextLines: 40,
-  language: "English",
+  languages: ["English", "Korean"],
   post: true,
   verifier: true,
   search: "off",
@@ -187,14 +187,35 @@ describe("runReview", () => {
     assert.match(world.requests[0]?.prompt ?? "", /Not shown:\n- src\/x\.ts: could not be read: HTTP 500/);
   });
 
-  it("posts each finding as a comment with the reviewer and commit in the footer, keeping a proven P1 a P1", async () => {
+  it("posts each finding as a comment of grade, title, place, condition and evidence only, keeping a proven P1 a P1", async () => {
     const world = setup({ answer: answer(proven(), { severity: "P3", title: "Nit", detail: "" }) });
     const result = await runReview(world.deps, REF, OPTIONS);
     assert.equal(result.posted.length, 2);
     assert.equal(result.reviewer, "claude/opus");
     assert.equal(world.posted[0]?.split("\n")[0], "**P1** Bug");
     assert.match(world.posted[0] ?? "", /Condition: a is 0/);
-    assert.match(world.posted[0] ?? "", /small-change review · claude\/opus · commit abc123def456/);
+    assert.match(world.posted[0] ?? "", /Evidence \/ 증거:\n- /);
+    for (const gone of ["small-change review", "claude/opus", "abc123def456", "Graded", "Firing"]) {
+      assert.ok(!(world.posted[0] ?? "").includes(gone), gone);
+    }
+  });
+
+  it("posts the Korean translation the reviewer gave, and counts the findings that came without one", async () => {
+    const translated = proven({ translations: [{ language: "Korean", title: "버그", condition: "a가 0일 때" }] });
+    const world = setup({ answer: answer(translated, proven({ title: "Other", line: 3 })) });
+    const result = await runReview(world.deps, REF, OPTIONS);
+    assert.equal(result.untranslated, 1);
+    assert.match(world.posted[0] ?? "", /^\*\*P1\*\* Bug\n버그\n\n/);
+    assert.match(world.posted[0] ?? "", /Condition: a is 0\n조건: a가 0일 때/);
+    assert.equal(world.posted[1]?.split("\n")[1], "", "no Korean line when the reviewer gave none");
+    assert.match(world.requests[0]?.prompt ?? "", /for each of Korean/);
+  });
+
+  it("asks for no translations, and counts none missing, when only one language is asked for", async () => {
+    const world = setup({ answer: answer(proven()) });
+    const result = await runReview(world.deps, REF, { ...OPTIONS, languages: ["English"] });
+    assert.equal(result.untranslated, 0);
+    assert.doesNotMatch(world.requests[0]?.prompt ?? "", /translations/);
   });
 
   it("posts a P1 that was not proven as a P3 and says why, so it cannot block the check", async () => {
@@ -202,8 +223,9 @@ describe("runReview", () => {
     const result = await runReview(world.deps, REF, OPTIONS);
     assert.equal(result.findings[0]?.severity, "P3");
     assert.equal(world.posted[0]?.split("\n")[0], "**P3** Bug");
-    assert.match(world.posted[0] ?? "", /_Graded P3, not P\u200B1: no evidence quote was found in the code shown\._/);
     assert.ok(!/\bP[12]\b/.test(world.posted[0] ?? ""), "the check, which reads the whole comment, does not count a P3");
+    assert.ok(!(world.posted[0] ?? "").includes("no evidence quote"), "why it was lowered stays in the output, not the comment");
+    assert.match(formatReview(result, true), /lowered from P1: no evidence quote was found in the code shown/);
   });
 
   it("accepts a quote from the expanded code that is not in the diff", async () => {
@@ -316,7 +338,7 @@ describe("runReview with a verifier", () => {
     assert.notEqual(request?.workdir, world.requests[0]?.workdir);
   });
 
-  it("posts a refuted P2 as a P3 with the counter quote, and names both models in the footer", async () => {
+  it("posts a refuted P2 as a P3 without the second reviewer's side, which stays in the output", async () => {
     const world = setup({
       answer: answer(proven({ severity: "P2" })),
       verifier: { answer: verdicts(refute(1)) },
@@ -326,10 +348,12 @@ describe("runReview with a verifier", () => {
     assert.deepEqual(result.verification, { by: "muse/muse-spark-1.3", checked: 1, refuted: 1, undecided: 0 });
     assert.equal(world.posted[0]?.split("\n")[0], "**P3** Bug");
     assert.ok(!/\bP[12]\b/.test(world.posted[0] ?? ""), "a finding the second reviewer refuted is not counted by the check");
-    assert.match(world.posted[0] ?? "", /_Graded P3, not P\u200B2: the second reviewer \(muse\/muse-spark-1\.3\) refuted it: the comment says it is deliberate\._/);
-    assert.match(world.posted[0] ?? "", /Against it:\n- `src\/x\.ts:3` `const b = a - 1;`/);
-    assert.match(world.posted[0] ?? "", /small-change review · claude\/opus · checked by muse\/muse-spark-1\.3 · commit abc123def456/);
-    assert.ok(!/\bP[12]\b/.test(world.posted[0]?.split("\n")[0] ?? ""));
+    for (const gone of ["Graded", "Against it", "refuted", "checked by", "muse/muse-spark-1.3", "deliberate"]) {
+      assert.ok(!(world.posted[0] ?? "").includes(gone), gone);
+    }
+    const output = formatReview(result, true);
+    assert.match(output, /lowered from P2: the second reviewer \(muse\/muse-spark-1\.3\) refuted it: the comment says it is deliberate/);
+    assert.match(output, /checked by muse\/muse-spark-1\.3: 1 P1\/P2 checked, 1 refuted/);
   });
 
   it("keeps what is upheld, unclear or unanswered, and counts the undecided", async () => {
@@ -656,15 +680,16 @@ describe("runReview with lookups", () => {
     assert.deepEqual(result.lookups?.asked, { reviewer: 1, verifier: 1 });
   });
 
-  it("names the engine in the footer of a comment only when lookups were answered", async () => {
+  it("does not name the engine or the commit in a comment, and counts the answered lookups in the output", async () => {
     const { engine } = fakeEngine();
     const used = withLookups({ answers: [asks({ grep: "sync()" }), answer({ severity: "P3", title: "Nit", detail: "" })] }, engine);
-    await runReview(used.deps, REF, { ...search, post: true });
-    assert.match(used.posted[0] ?? "", /looked up with git grep/);
+    const usedResult = await runReview(used.deps, REF, { ...search, post: true });
+    assert.doesNotMatch(used.posted[0] ?? "", /looked up/);
+    assert.match(formatReview(usedResult, true), /lookups: git grep, 1 request\(s\) answered/);
 
     const unused = withLookups({ answers: [answer({ severity: "P3", title: "Nit", detail: "" })] }, engine);
-    await runReview(unused.deps, REF, { ...search, post: true });
-    assert.doesNotMatch(unused.posted[0] ?? "", /looked up with/);
+    const unusedResult = await runReview(unused.deps, REF, { ...search, post: true });
+    assert.match(formatReview(unusedResult, true), /lookups: git grep, 0 request\(s\) answered/);
   });
 
   it("measures the time of each agent", async () => {
@@ -682,6 +707,7 @@ describe("formatReview", () => {
     reviewer: "claude/opus",
     context: { enabled: true, files: 2, bytes: 1234, omitted: [] },
     findings: [],
+    untranslated: 0,
     dropped: 0,
     omitted: 0,
     posted: [],
@@ -689,6 +715,11 @@ describe("formatReview", () => {
     calls: { reviewer: 1, verifier: 0 },
     timings: { reviewerMs: 61_400, verifierMs: 0, totalMs: 62_000 },
   };
+
+  it("says how many findings are not in every language, and nothing when all are", () => {
+    assert.doesNotMatch(formatReview({ ...base, findings: [finding({})] }, true), /translation/);
+    assert.match(formatReview({ ...base, findings: [finding({})], untranslated: 1 }, true), /1 finding\(s\) came without a translation in every language asked for/);
+  });
 
   it("says what was shown and that there were no findings", () => {
     const text = formatReview(base, true);
