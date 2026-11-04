@@ -95,10 +95,10 @@ npx --yes github:zereight/small-change --help
 npx --yes github:zereight/small-change <PR URL> --kind backend
 ```
 
-The first run clones the repository and builds it, which takes about half a minute. Each later run
-asks GitHub for the latest commit, so a new commit is picked up on its own and an unchanged one
-costs about three seconds. To stay on one version, name a commit or tag:
-`github:zereight/small-change#<commit>`. The commands below are written as `small-change ...`;
+Every run asks GitHub for the latest commit before it starts, so a new commit is picked up on its
+own. The tool starts after about 7 seconds, and the first run after about 9 (measured from one
+machine). To stay on one version, name a commit or tag: `github:zereight/small-change#<commit>`;
+that is not faster. The commands below are written as `small-change ...`;
 with `npx` that is `npx --yes github:zereight/small-change ...`.
 
 To work on the code, clone it:
