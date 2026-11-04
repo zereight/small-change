@@ -14,6 +14,7 @@ const VERIFIER = { provider: "muse" as const, model: "muse-spark-1.3", budget: "
 const OPTIONS: ReviewOptions = {
   maxFindings: 10,
   maxDiffBytes: 5000,
+  maxParts: 6,
   contextBytes: 100_000,
   contextLines: 40,
   languages: ["English", "Korean"],
@@ -262,11 +263,104 @@ describe("runReview", () => {
     await assert.rejects(runReview(world.deps, REF, OPTIONS), /Posted 1 of 2 comments before failing: 403 forbidden/);
   });
 
-  it("refuses a diff over the limit instead of reviewing part of it, and never reads a file or calls the agent", async () => {
-    const world = setup({ diff: "x".repeat(5001) });
-    await assert.rejects(runReview(world.deps, REF, OPTIONS), /over the limit of 5000/);
-    assert.equal(world.requests.length, 0);
-    assert.deepEqual(world.reads, []);
+  describe("a diff over --max-diff-bytes", () => {
+    const fileDiff = (name: string, code: string) =>
+      `diff --git a/src/${name} b/src/${name}\n--- a/src/${name}\n+++ b/src/${name}\n@@ -1 +1,2 @@\n const a = 1;\n+${code}\n`;
+    const X = fileDiff("x.ts", "const b = a - 1;");
+    const Y = fileDiff("y.ts", "const c = a - 2;");
+    const Z = fileDiff("z.ts", "const d = a - 3;");
+    const limit = Buffer.byteLength(X) + 5; // one file to a part
+    const files = {
+      "src/x.ts": "const a = 1;\nconst b = a - 1;\n",
+      "src/y.ts": "const a = 1;\nconst c = a - 2;\n",
+      "src/z.ts": "const a = 1;\nconst d = a - 3;\n",
+    };
+    const finding = (name: string, code: string, extra: object = {}) =>
+      proven({ path: `src/${name}`, line: 2, title: `Bug in ${name}`, evidence: [{ path: `src/${name}`, line: 2, quote: code }], ...extra });
+    const split = { ...OPTIONS, maxDiffBytes: limit };
+
+    it("is reviewed in parts, cut between files, each with its own code, and the findings are merged most severe first", async () => {
+      const world = setup({
+        diff: X + Y + Z,
+        files,
+        answers: [
+          answer(finding("x.ts", "const b = a - 1;", { severity: "P2" })),
+          answer(),
+          answer(finding("z.ts", "const d = a - 3;", { severity: "P1" }), finding("z.ts", "const d = a - 3;", { severity: "P3", title: "Nit in z" })),
+        ],
+      });
+      const result = await runReview(world.deps, REF, split);
+      assert.equal(result.parts, 3);
+      assert.deepEqual(result.notReviewed, []);
+      assert.deepEqual(result.calls, { reviewer: 3, verifier: 0 });
+      assert.equal(world.requests.length, 3);
+      const [first, second, third] = world.requests.map((request) => request.prompt);
+      assert.ok(first?.includes("src/x.ts") && !first.includes("src/y.ts") && !first.includes("src/z.ts"));
+      assert.ok(second?.includes("src/y.ts") && !second.includes("src/x.ts"));
+      assert.ok(third?.includes("src/z.ts") && !third.includes("src/y.ts"));
+      assert.match(first ?? "", /reviewed in 3 parts, and this is part 1\./);
+      assert.match(third ?? "", /this is part 3\./);
+      assert.deepEqual(result.findings.map((item) => item.severity), ["P1", "P2", "P3"]);
+      assert.deepEqual(world.posted.map((body) => body.split("\n")[0]), ["**P1** Bug in z.ts", "**P2** Bug in x.ts", "**P3** Nit in z"]);
+      assert.deepEqual([...world.reads].sort(), ["abc123def456:src/x.ts", "abc123def456:src/y.ts", "abc123def456:src/z.ts"], "each file is read once");
+      assert.equal(result.context.files, 3);
+    });
+
+    it("does not accept a quote from a part that the reviewer was not shown with", async () => {
+      const world = setup({
+        diff: X + Y,
+        files,
+        answers: [answer(finding("x.ts", "const c = a - 2;", { severity: "P1", evidence: [{ path: "src/y.ts", line: 2, quote: "const c = a - 2;" }] })), answer()],
+      });
+      const result = await runReview(world.deps, REF, split);
+      assert.equal(result.findings[0]?.severity, "P3", "its proof is in the other part");
+      assert.equal(result.findings[0]?.lowered?.from, "P1");
+    });
+
+    it("applies the findings limit to all the parts together, keeping the most severe", async () => {
+      const world = setup({
+        diff: X + Y,
+        files,
+        answers: [answer(finding("x.ts", "const b = a - 1;", { severity: "P2" })), answer(finding("y.ts", "const c = a - 2;", { severity: "P1" }))],
+      });
+      const result = await runReview(world.deps, REF, { ...split, maxFindings: 1 });
+      assert.deepEqual(result.findings.map((item) => item.title), ["Bug in y.ts"]);
+      assert.equal(result.omitted, 1);
+    });
+
+    it("stops at --max-parts and lists the files after it as not reviewed, in the output too", async () => {
+      const world = setup({ diff: X + Y + Z, files, answer: answer() });
+      const result = await runReview(world.deps, REF, { ...split, maxParts: 1 });
+      assert.equal(result.parts, 1);
+      assert.equal(world.requests.length, 1);
+      assert.deepEqual(result.notReviewed.map((entry) => entry.path), ["src/y.ts", "src/z.ts"]);
+      assert.match(formatReview(result, false), /NOT REVIEWED: 2 file\(s\) were in no part, so nothing was looked for in them: src\/y\.ts \(\d+ bytes, it is past the last of 1 part\(s\)\); src\/z\.ts/);
+      assert.match(formatReview(result, false), /raise --max-diff-bytes or --max-parts/);
+    });
+
+    it("lists a file that alone is over the limit, reviews the rest, and calls no agent when nothing is left", async () => {
+      const big = fileDiff("big.ts", "x".repeat(limit));
+      const world = setup({ diff: X + big, files, answer: answer() });
+      const result = await runReview(world.deps, REF, split);
+      assert.deepEqual(result.notReviewed.map((entry) => entry.path), ["src/big.ts"]);
+      assert.equal(world.requests.length, 1);
+
+      const alone = setup({ diff: big, files });
+      const nothing = await runReview(alone.deps, REF, split);
+      assert.equal(alone.requests.length, 0);
+      assert.deepEqual(alone.reads, [], "no file is read when no part is reviewed");
+      assert.deepEqual(nothing.findings, []);
+      assert.equal(nothing.parts, 0);
+      assert.match(formatReview(nothing, true), /NOT REVIEWED: 1 file\(s\)/);
+    });
+
+    it("sends a diff that fits as one part, without saying it is in parts", async () => {
+      const world = setup({ diff: X + Y, files, answer: answer() });
+      const result = await runReview(world.deps, REF, { ...OPTIONS, maxDiffBytes: 100_000 });
+      assert.equal(result.parts, 1);
+      assert.doesNotMatch(world.requests[0]?.prompt ?? "", /reviewed in \d+ parts/);
+      assert.doesNotMatch(formatReview(result, false), /cut between files/);
+    });
   });
 
   it("does not call the agent for an empty diff", async () => {
@@ -311,6 +405,48 @@ describe("runReview with a verifier", () => {
     const skipped = await runReview(off.deps, REF, { ...OPTIONS, verifier: false });
     assert.equal(skipped.verification, undefined);
     assert.equal(off.verifierRequests.length, 0);
+  });
+
+  it("checks the P1 and P2 of each part with the code of that part, and adds up what it did", async () => {
+    const fileDiff = (name: string, code: string) =>
+      `diff --git a/src/${name} b/src/${name}\n--- a/src/${name}\n+++ b/src/${name}\n@@ -1 +1,2 @@\n const a = 1;\n+${code}\n`;
+    const X = fileDiff("x.ts", "const b = a - 1;");
+    const Y = fileDiff("y.ts", "const c = a - 2;");
+    const finding = (name: string, code: string) =>
+      proven({ severity: "P2", path: `src/${name}`, line: 2, title: `Bug in ${name}`, evidence: [{ path: `src/${name}`, line: 2, quote: code }] });
+    const world = setup({
+      diff: X + Y,
+      files: { "src/x.ts": "const a = 1;\nconst b = a - 1;\n", "src/y.ts": "const a = 1;\nconst c = a - 2;\n" },
+      answers: [answer(finding("x.ts", "const b = a - 1;")), answer(finding("y.ts", "const c = a - 2;"))],
+      verifier: {
+        answers: [
+          verdicts(refute(1, { counter: { path: "src/x.ts", line: 2, quote: "const b = a - 1;" } })),
+          verdicts({ id: 1, verdict: "upheld" }),
+        ],
+      },
+    });
+    const result = await runReview(world.deps, REF, { ...OPTIONS, maxDiffBytes: Buffer.byteLength(X) + 5 });
+    assert.equal(world.verifierRequests.length, 2);
+    assert.ok(world.verifierRequests[0]?.prompt.includes("src/x.ts") && !world.verifierRequests[0].prompt.includes("src/y.ts"));
+    assert.ok(world.verifierRequests[1]?.prompt.includes("src/y.ts") && !world.verifierRequests[1].prompt.includes("src/x.ts"));
+    assert.deepEqual(result.verification, { by: "muse/muse-spark-1.3", checked: 2, refuted: 1, undecided: 0 });
+    assert.deepEqual(result.calls, { reviewer: 2, verifier: 2 });
+    assert.deepEqual(result.findings.map((item) => [item.title, item.severity]), [["Bug in y.ts", "P2"], ["Bug in x.ts", "P3"]]);
+  });
+
+  it("posts nothing when the verifier fails on a later part", async () => {
+    const fileDiff = (name: string, code: string) =>
+      `diff --git a/src/${name} b/src/${name}\n--- a/src/${name}\n+++ b/src/${name}\n@@ -1 +1,2 @@\n const a = 1;\n+${code}\n`;
+    const X = fileDiff("x.ts", "const b = a - 1;");
+    const Y = fileDiff("y.ts", "const c = a - 2;");
+    const world = setup({
+      diff: X + Y,
+      files: { "src/x.ts": "const a = 1;\nconst b = a - 1;\n", "src/y.ts": "const a = 1;\nconst c = a - 2;\n" },
+      answers: [answer(), answer(proven({ path: "src/y.ts", line: 2, evidence: [{ path: "src/y.ts", line: 2, quote: "const c = a - 2;" }] }))],
+      verifier: { error: "timed out" },
+    });
+    await assert.rejects(runReview(world.deps, REF, { ...OPTIONS, maxDiffBytes: Buffer.byteLength(X) + 5 }), /The verifier \(muse\/muse-spark-1\.3\) failed, so nothing was posted: timed out/);
+    assert.deepEqual(world.posted, []);
   });
 
   it("is not asked about findings that are not P1 or P2, and not run when there are none", async () => {
@@ -705,6 +841,8 @@ describe("formatReview", () => {
   const base: ReviewResult = {
     pullRequest: { ref: REF, title: "Add thing", sourceCommit: "abc" },
     reviewer: "claude/opus",
+    parts: 1,
+    notReviewed: [],
     context: { enabled: true, files: 2, bytes: 1234, omitted: [] },
     findings: [],
     untranslated: 0,
@@ -715,6 +853,17 @@ describe("formatReview", () => {
     calls: { reviewer: 1, verifier: 0 },
     timings: { reviewerMs: 61_400, verifierMs: 0, totalMs: 62_000 },
   };
+
+  it("says the diff was cut into parts, and lists what was not reviewed, a few and how many more", () => {
+    const entry = (n: number) => ({ path: `src/f${n}.ts`, bytes: 100 * n, reason: "it is past the last of 2 part(s)" });
+    const text = formatReview({ ...base, parts: 3, notReviewed: [1, 2, 3, 4, 5, 6].map(entry) }, false);
+    assert.match(text, /diff: large, so it was cut between files and reviewed in 3 parts/);
+    assert.match(text, /NOT REVIEWED: 6 file\(s\) were in no part, so nothing was looked for in them: src\/f1\.ts \(100 bytes, it is past the last of 2 part\(s\)\); src\/f2\.ts/);
+    assert.match(text, /src\/f4\.ts[^;]*; and 2 more \(see --json\)/);
+    assert.ok(!text.includes("src/f5.ts"));
+    const plain = formatReview(base, false);
+    assert.doesNotMatch(plain, /NOT REVIEWED|cut between files/);
+  });
 
   it("says how many findings are not in every language, and nothing when all are", () => {
     assert.doesNotMatch(formatReview({ ...base, findings: [finding({})] }, true), /translation/);

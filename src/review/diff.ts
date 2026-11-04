@@ -96,6 +96,64 @@ export function parseDiff(diff: string): DiffFile[] {
 
 /** `a/x b/y` from `diff --git a/x b/y`; for a path with spaces the halves may be wrong, and the
  * `---`/`+++` lines then correct it. */
+/** A file, or all of a diff, that is not in any part: where, how big, and why. */
+export interface LeftOut {
+  path: string;
+  bytes: number;
+  reason: string;
+}
+
+/**
+ * Cuts a diff into parts of at most `limit` bytes, between files and in the order of the diff, so
+ * that a pull request of any size can be reviewed one part at a time. A diff that fits stays one
+ * part, untouched. At most `maxParts` parts are made, so the cost of a very large diff has an end.
+ * Whatever is not in a part is listed with the reason, never dropped silently: a file whose diff
+ * alone is over the limit, the files after the last part, and a large diff that is not in the git
+ * format and so cannot be cut.
+ */
+export function splitDiff(diff: string, limit: number, maxParts: number): { parts: string[]; leftOut: LeftOut[] } {
+  const total = Buffer.byteLength(diff);
+  if (total <= limit) {
+    return { parts: [diff], leftOut: [] };
+  }
+  const starts = [...diff.matchAll(/^diff --git /gm)].map((match) => match.index);
+  if (starts.length === 0) {
+    return { parts: [], leftOut: [{ path: "(the whole diff)", bytes: total, reason: "it is not in the git format, so it cannot be cut into files" }] };
+  }
+
+  const parts: string[] = [];
+  const leftOut: LeftOut[] = [];
+  let current: string[] = [];
+  let size = 0;
+  const close = () => {
+    if (current.length > 0) {
+      parts.push(current.join(""));
+      current = [];
+      size = 0;
+    }
+  };
+  for (const [index, start] of starts.entries()) {
+    const text = diff.slice(start, starts[index + 1] ?? diff.length);
+    const bytes = Buffer.byteLength(text);
+    const path = pathFromHeader(text.split("\n", 1)[0] ?? "");
+    if (bytes > limit) {
+      leftOut.push({ path, bytes, reason: `its diff alone is over the limit of ${limit} bytes` });
+      continue;
+    }
+    if (size + bytes > limit) {
+      close();
+    }
+    if (current.length === 0 && parts.length >= maxParts) {
+      leftOut.push({ path, bytes, reason: `it is past the last of ${maxParts} part(s)` });
+      continue;
+    }
+    current.push(text);
+    size += bytes;
+  }
+  close();
+  return { parts, leftOut };
+}
+
 function pathFromHeader(line: string): string {
   const rest = line.slice("diff --git ".length);
   const match = /^a\/(.+) b\/(.+)$/.exec(rest);

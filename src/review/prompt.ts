@@ -21,6 +21,8 @@ export interface PromptInput extends Material {
   /** The languages the findings are written in: the first for everything, the others as translations of the title and condition. */
   languages: readonly string[];
   maxFindings: number;
+  /** Set when the diff is too large for one prompt and is reviewed in parts: which part this is. */
+  part?: { index: number; of: number };
   /** Fixes the boundary marker; tests only. */
   nonce?: string;
 }
@@ -58,7 +60,12 @@ Before you file a P1 or P2, try to refute it:
 Rules:
 ${input.lookup === undefined ? "" : `- ${lookupInstructions(input.lookup, "findings").replace(/\n/g, "\n  ")}\n`}- The material has the diff and, for changed files, the surrounding code with line numbers ("123| code"). Files that are not shown are listed. Do not assume what code you were not shown contains. If a finding depends on it, use basis "contract", or ask.
 - Each finding has a grade, a short title (under 100 characters), and a detail that says what is wrong and how to fix it. Give "path" and "line" in the NEW version of the file, using the numbers shown.
-- Report at most ${input.maxFindings} findings, the most severe first. When you find nothing, report an empty list.
+- Report at most ${input.maxFindings} findings, the most severe first. When you find nothing, report an empty list.${
+    input.part === undefined
+      ? ""
+      : `
+- The pull request is large, so its diff is reviewed in ${input.part.of} parts, and this is part ${input.part.index}. Review what is shown, and report nothing about files that are not shown.`
+  }
 - Write the titles, details and conditions in ${input.languages[0]}. Keep the quotes exactly as they are in the code.${
     input.languages.length > 1
       ? `

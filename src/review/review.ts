@@ -9,7 +9,7 @@ import type { PullRequestRef } from "../pr-url.ts";
 import { formatComment, headline } from "./comment.ts";
 import type { Checkout, CheckoutRequest } from "./checkout.ts";
 import { buildContext, type ContextOmission } from "./context.ts";
-import { parseDiff } from "./diff.ts";
+import { type LeftOut, parseDiff, splitDiff } from "./diff.ts";
 import { ENGINES, type SearchEngine, type SearchId } from "./engines.ts";
 import { type Finding, parseFindings, SEVERITIES } from "./findings.ts";
 import { type LookupMode, parseLookups } from "./lookup.ts";
@@ -20,8 +20,10 @@ import { applyVerdict, buildVerifyPrompt, bySeverity, isBlocking, parseVerdicts 
 
 export interface ReviewOptions {
   maxFindings: number;
-  /** A diff larger than this is refused, not truncated: a review of part of a PR would mislead. */
+  /** A diff larger than this is reviewed in parts of at most this many bytes, cut between files. */
   maxDiffBytes: number;
+  /** The most parts that are reviewed; a very large diff costs one run of the reviewer for each. */
+  maxParts: number;
   /** The most code of the changed files, in bytes, that is shown besides the diff. Zero: the diff only. */
   contextBytes: number;
   /** Lines of code shown around each change, when a file is too large to be shown whole. */
@@ -57,6 +59,10 @@ export interface ReviewResult {
   pullRequest: { ref: PullRequestRef; title: string; sourceCommit: string };
   /** `provider/model` of the reviewer. */
   reviewer: string;
+  /** How many parts the diff was cut into, each reviewed on its own: 1 for a diff that fits. */
+  parts: number;
+  /** Files, or all of a diff, that no part holds and so were not reviewed, with the reason. */
+  notReviewed: LeftOut[];
   /** What the reviewer was shown besides the diff. */
   context: { enabled: boolean; files: number; bytes: number; omitted: ContextOmission[] };
   /** The findings after grading; a P1 or P2 that was not proven carries `lowered`. */
@@ -112,6 +118,8 @@ export async function runReview(
   const result: ReviewResult = {
     pullRequest: { ref, title: pullRequest.title, sourceCommit: pullRequest.sourceCommit },
     reviewer,
+    parts: 0,
+    notReviewed: [],
     context: { enabled: options.contextBytes > 0, files: 0, bytes: 0, omitted: [] },
     findings: [],
     untranslated: 0,
@@ -125,28 +133,13 @@ export async function runReview(
   if (diff.trim() === "") {
     return result;
   }
-  const bytes = Buffer.byteLength(diff);
-  if (bytes > options.maxDiffBytes) {
-    throw new Error(
-      `The diff is ${bytes} bytes, over the limit of ${options.maxDiffBytes}; raise --max-diff-bytes or review it by hand`,
-    );
+  const split = splitDiff(diff, options.maxDiffBytes, options.maxParts);
+  result.parts = split.parts.length;
+  result.notReviewed = split.leftOut;
+  if (split.parts.length === 0) {
+    return result;
   }
 
-  const diffFiles = parseDiff(diff);
-  const context = await buildContext(
-    diffFiles,
-    (path) => bitbucket.getFile(pullRequest.sourceRepository ?? ref, pullRequest.sourceCommit, path),
-    { lines: options.contextLines, totalBytes: options.contextBytes },
-  );
-  result.context = { enabled: options.contextBytes > 0, files: context.files.length, bytes: context.bytes, omitted: context.omitted };
-
-  const material = {
-    title: pullRequest.title,
-    description: pullRequest.description,
-    diff,
-    files: context.files,
-    omitted: context.omitted,
-  };
   const opened =
     engine === undefined
       ? undefined
@@ -169,79 +162,111 @@ export async function runReview(
     }
   }
 
+  let verifierRuns = 0;
   try {
-    const reviewerStarted = performance.now();
-    const answer = await converse({
-      deps,
-      provider,
-      choice: config,
-      timeoutMs: options.timeoutMs,
-      session,
-      agent: "reviewer",
-      maxLookups: options.maxLookups,
-      prompt: (lookup, lookups) =>
-        buildPrompt({
-          ...material,
-          lookups,
-          ...(lookup === undefined ? {} : { lookup }),
-          languages: options.languages,
-          maxFindings: options.maxFindings,
-        }),
-    });
-    result.timings.reviewerMs = performance.now() - reviewerStarted;
-    // Built when needed: what the agents were shown by lookups grows as they ask.
-    const check = () => buildQuoteChecker(diffFiles, [...context.files, ...shownByLookups(session)]);
-    const parsed = parseFindings(answer, options.maxFindings, check(), options.languages.slice(1));
-    result.findings = parsed.findings;
-    result.dropped = parsed.dropped;
-    result.omitted = parsed.omitted;
-
-    const candidates = parsed.findings.filter(isBlocking);
-    if (verifier !== undefined && candidates.length > 0) {
-      const by = `${verifier.provider.id}/${verifier.config.model}`;
-      const verifierStarted = performance.now();
-      let verdicts: ReturnType<typeof parseVerdicts>;
-      try {
-        const reply = await converse({
-          deps,
-          provider: verifier.provider,
-          choice: verifier.config,
-          timeoutMs: options.timeoutMs,
-          session,
-          agent: "verifier",
-          maxLookups: options.maxLookups,
-          prompt: (lookup, lookups) =>
-            buildVerifyPrompt({
-              ...material,
-              lookups,
-              ...(lookup === undefined ? {} : { lookup }),
-              candidates,
-              language: options.languages[0] ?? "English",
-            }),
-        });
-        verdicts = parseVerdicts(reply, candidates, check());
-      } catch (error) {
-        throw new Error(
-          `The verifier (${by}) failed, so nothing was posted: ${error instanceof Error ? error.message : String(error)}`,
-          { cause: error },
-        );
-      }
-      result.timings.verifierMs = performance.now() - verifierStarted;
-      const verdictOf = new Map(candidates.map((finding, index) => [finding, verdicts[index]] as const));
-      result.findings = bySeverity(parsed.findings.map((finding) => applyVerdict(finding, verdictOf.get(finding), by)));
-      result.verification = {
-        by,
-        checked: candidates.length,
-        refuted: verdicts.filter((verdict) => verdict?.verdict === "refuted").length,
-        undecided: verdicts.filter((verdict) => verdict === undefined || verdict.verdict === "unclear").length,
+    const all: Finding[] = [];
+    const verification = { by: "", checked: 0, refuted: 0, undecided: 0 };
+    for (const [index, part] of split.parts.entries()) {
+      const diffFiles = parseDiff(part);
+      const context = await buildContext(
+        diffFiles,
+        (path) => bitbucket.getFile(pullRequest.sourceRepository ?? ref, pullRequest.sourceCommit, path),
+        { lines: options.contextLines, totalBytes: options.contextBytes },
+      );
+      result.context = {
+        enabled: options.contextBytes > 0,
+        files: result.context.files + context.files.length,
+        bytes: result.context.bytes + context.bytes,
+        omitted: [...result.context.omitted, ...context.omitted],
       };
+      const material = {
+        title: pullRequest.title,
+        description: pullRequest.description,
+        diff: part,
+        files: context.files,
+        omitted: context.omitted,
+      };
+
+      const reviewerStarted = performance.now();
+      const answer = await converse({
+        deps,
+        provider,
+        choice: config,
+        timeoutMs: options.timeoutMs,
+        session,
+        agent: "reviewer",
+        maxLookups: options.maxLookups,
+        prompt: (lookup, lookups) =>
+          buildPrompt({
+            ...material,
+            lookups,
+            ...(lookup === undefined ? {} : { lookup }),
+            languages: options.languages,
+            maxFindings: options.maxFindings,
+            ...(split.parts.length > 1 ? { part: { index: index + 1, of: split.parts.length } } : {}),
+          }),
+      });
+      result.timings.reviewerMs += performance.now() - reviewerStarted;
+      // Built when needed: what the agents were shown by lookups grows as they ask.
+      const check = () => buildQuoteChecker(diffFiles, [...context.files, ...shownByLookups(session)]);
+      const parsed = parseFindings(answer, options.maxFindings, check(), options.languages.slice(1));
+      result.dropped += parsed.dropped;
+      result.omitted += parsed.omitted;
+      let findings = parsed.findings;
+
+      const candidates = findings.filter(isBlocking);
+      if (verifier !== undefined && candidates.length > 0) {
+        const by = `${verifier.provider.id}/${verifier.config.model}`;
+        const verifierStarted = performance.now();
+        let verdicts: ReturnType<typeof parseVerdicts>;
+        try {
+          const reply = await converse({
+            deps,
+            provider: verifier.provider,
+            choice: verifier.config,
+            timeoutMs: options.timeoutMs,
+            session,
+            agent: "verifier",
+            maxLookups: options.maxLookups,
+            prompt: (lookup, lookups) =>
+              buildVerifyPrompt({
+                ...material,
+                lookups,
+                ...(lookup === undefined ? {} : { lookup }),
+                candidates,
+                language: options.languages[0] ?? "English",
+              }),
+          });
+          verdicts = parseVerdicts(reply, candidates, check());
+        } catch (error) {
+          throw new Error(
+            `The verifier (${by}) failed, so nothing was posted: ${error instanceof Error ? error.message : String(error)}`,
+            { cause: error },
+          );
+        }
+        result.timings.verifierMs += performance.now() - verifierStarted;
+        const verdictOf = new Map(candidates.map((finding, position) => [finding, verdicts[position]] as const));
+        findings = findings.map((finding) => applyVerdict(finding, verdictOf.get(finding), by));
+        verifierRuns++;
+        verification.by = by;
+        verification.checked += candidates.length;
+        verification.refuted += verdicts.filter((verdict) => verdict?.verdict === "refuted").length;
+        verification.undecided += verdicts.filter((verdict) => verdict === undefined || verdict.verdict === "unclear").length;
+      }
+      all.push(...findings);
+    }
+    const ranked = bySeverity(all);
+    result.findings = ranked.slice(0, options.maxFindings);
+    result.omitted += Math.max(0, ranked.length - options.maxFindings);
+    if (verifierRuns > 0) {
+      result.verification = verification;
     }
   } finally {
     await session?.dispose();
   }
   result.calls = {
-    reviewer: 1 + (result.lookups?.asked.reviewer ?? 0),
-    verifier: result.verification === undefined ? 0 : 1 + (result.lookups?.asked.verifier ?? 0),
+    reviewer: split.parts.length + (result.lookups?.asked.reviewer ?? 0),
+    verifier: verifierRuns + (result.lookups?.asked.verifier ?? 0),
   };
 
   const others = options.languages.slice(1);
@@ -393,6 +418,7 @@ export function formatReview(result: ReviewResult, post: boolean): string {
   const lines = [
     `${ref.workspace}/${ref.repo}#${ref.id} "${title}"`,
     `reviewed commit ${sourceCommit} with ${result.reviewer}`,
+    ...(result.parts > 1 ? [`diff: large, so it was cut between files and reviewed in ${result.parts} parts`] : []),
     contextLine(result.context),
     ...lookupLines(result.lookups),
     ...(result.verification === undefined
@@ -446,6 +472,14 @@ export function formatReview(result: ReviewResult, post: boolean): string {
   }
   if (result.dropped > 0) {
     lines.push(`${result.dropped} entry(ies) of the answer were not findings and were ignored.`);
+  }
+  if (result.notReviewed.length > 0) {
+    const listed = result.notReviewed.slice(0, SHOWN_OMISSIONS).map((entry) => `${entry.path} (${entry.bytes} bytes, ${entry.reason})`);
+    const rest = result.notReviewed.length - listed.length;
+    lines.push(
+      `NOT REVIEWED: ${result.notReviewed.length} file(s) were in no part, so nothing was looked for in them: ${listed.join("; ")}${rest > 0 ? `; and ${rest} more (see --json)` : ""}`,
+      "To review them, raise --max-diff-bytes or --max-parts.",
+    );
   }
   lines.push(
     `time: reviewer ${seconds(result.timings.reviewerMs)} (${result.calls.reviewer} run(s))` +

@@ -20,7 +20,10 @@ Options:
                            the model writes in and the output uses; the others are translations of each
                            comment's title and condition (default: English,Korean)
   --max-findings <n>       Report at most n findings (default: 10)
-  --max-diff-bytes <n>     Refuse a diff larger than n bytes (default: 300000)
+  --max-diff-bytes <n>     Review a diff larger than n bytes in parts of at most n bytes, cut between files
+                           (default: 300000)
+  --max-parts <n>          Review at most n parts; the files after them are listed as not reviewed
+                           (default: 6)
   --context-bytes <n>      Show at most n bytes of the changed files' code besides the diff, so that
                            findings can rest on code around the change; 0: the diff only (default: 120000)
   --context-lines <n>      Lines shown around each change in a file too large to show whole (default: 40)
@@ -92,6 +95,7 @@ export function parseReviewArgs(argv: string[]): ReviewCommand {
       languages,
       maxFindings: positive(values["max-findings"], "--max-findings") ?? 10,
       maxDiffBytes: positive(values["max-diff-bytes"], "--max-diff-bytes") ?? 300_000,
+      maxParts: positive(values["max-parts"], "--max-parts") ?? 6,
       contextBytes: nonNegative(values["context-bytes"], "--context-bytes") ?? 120_000,
       contextLines: positive(values["context-lines"], "--context-lines") ?? 40,
       timeoutMs: (positive(values.timeout, "--timeout") ?? 900) * 1000,
@@ -113,6 +117,7 @@ function parse(argv: string[]) {
       language: { type: "string" },
       "max-findings": { type: "string" },
       "max-diff-bytes": { type: "string" },
+      "max-parts": { type: "string" },
       "context-bytes": { type: "string" },
       "context-lines": { type: "string" },
       timeout: { type: "string" },

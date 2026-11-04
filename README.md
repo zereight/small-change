@@ -201,7 +201,7 @@ small-change review https://bitbucket.org/team/platform/pull-requests/128 --post
 `--finding-pattern` of the check counts it. Name the posting identity in the check with `--bot`.
 Posting needs `BITBUCKET_TOKEN` with write access to pull requests. A finding is skipped when a
 comment on the PR already opens with the same line, so running the review twice does not post
-twice. Other flags: `--language`, `--max-findings`, `--max-diff-bytes`, `--context-bytes`,
+twice. Other flags: `--language`, `--max-findings`, `--max-diff-bytes`, `--max-parts`, `--context-bytes`,
 `--context-lines`, `--no-verifier`, `--timeout`, `--json` (print the result as JSON), and
 `--search`, `--max-lookups` (see "Looking up more code").
 
@@ -329,8 +329,16 @@ What keeps an untrusted PR from steering the review:
   not proof that a PR is safe.
 - Anything the agent writes is treated as text: `@` mentions and Markdown images are defused before
   posting, and each field is length-limited. An answer that is not the expected JSON posts nothing.
-- A diff over `--max-diff-bytes` (default 300000) is refused, not cut: a review of part of a PR
-  would read as a review of all of it.
+- A review does not depend on the size of the change or on `--kind`: a PR that is not a small
+  change is reviewed like any other. A diff over `--max-diff-bytes` (default 300000) is cut between
+  files into parts of at most that size, and each part is reviewed on its own (the reviewer and the
+  verifier see that part's diff and files; with `--search` they can still look anywhere in the PR).
+  Findings of all parts are merged, most severe first, up to `--max-findings`. A part costs one run
+  of the reviewer, so at most `--max-parts` (default 6) are reviewed. Nothing is dropped quietly: a
+  file whose diff alone is over the limit, and the files after the last part, are printed under
+  `NOT REVIEWED` and are in `--json` as `notReviewed`. They are not in the comments, so a PR with no
+  P1 or P2 comment may still have had files that nobody looked at. A problem that spans two parts
+  can be missed, since neither run sees both.
 
 Limits observed on a real machine:
 
