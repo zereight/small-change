@@ -4,18 +4,20 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
-import { canRun, defaultExec } from "../src/llm/exec.ts";
+import { defaultExec } from "../src/llm/exec.ts";
 import type { Exec, ExecOptions } from "../src/llm/types.ts";
 import { type Checkout, createCheckout } from "../src/review/checkout.ts";
 import {
   type EngineContext,
   gitGrep,
   graftEngine,
+  olderThan,
   parseGitGrep,
   parseGraftCallers,
   parseGraftGrep,
   parseGraftSkeleton,
   parseTgrepJson,
+  parseVersion,
   runNeed,
   type SearchEngine,
   tgrep,
@@ -24,7 +26,7 @@ import { LIMITS, LookupPool, type Need } from "../src/review/lookup.ts";
 
 const grepNeed = (pattern: string, extra: Partial<Extract<Need, { kind: "grep" }>> = {}): Need => ({ kind: "grep", pattern, regex: false, ignoreCase: false, ...extra });
 const COMMIT = "c".repeat(40);
-const hasTgrep = await canRun(defaultExec, "tgrep");
+const hasTgrep = await tgrep.isAvailable(defaultExec);
 
 describe("parsers", () => {
   it("parseGitGrep reads <commit>:<path> NUL <line> NUL <text>, and survives odd lines", () => {
@@ -113,12 +115,53 @@ syncTokenAsync · function · packages/feature-common/src/token-sync/sync-token.
   });
 });
 
+describe("the tgrep version", () => {
+  it("reads a version from the output of --version", () => {
+    assert.deepEqual(parseVersion("tgrep 1.2.6\n"), [1, 2, 6]);
+    assert.deepEqual(parseVersion("tgrep 10.0.12 (abc)"), [10, 0, 12]);
+    assert.equal(parseVersion("tgrep dev"), undefined);
+    assert.equal(parseVersion(""), undefined);
+  });
+
+  it("compares numbers, not strings", () => {
+    assert.equal(olderThan([1, 0, 8], [1, 2, 6]), true);
+    assert.equal(olderThan([1, 2, 5], [1, 2, 6]), true);
+    assert.equal(olderThan([1, 2, 6], [1, 2, 6]), false);
+    assert.equal(olderThan([1, 2, 10], [1, 2, 6]), false);
+    assert.equal(olderThan([1, 10, 0], [1, 2, 6]), false);
+    assert.equal(olderThan([2, 0, 0], [1, 9, 9]), false);
+    assert.equal(olderThan([0, 9, 9], [1, 0, 0]), true);
+  });
+
+  const reporting = (stdout: string, code = 0): Exec => async () => ({ code, stdout, stderr: "" });
+
+  it("is available from 1.2.6 on, and not before, and not when it does not run or prints no version", async () => {
+    assert.equal(await tgrep.isAvailable(reporting("tgrep 1.2.6\n")), true);
+    assert.equal(await tgrep.isAvailable(reporting("tgrep 1.3.0\n")), true);
+    assert.equal(await tgrep.isAvailable(reporting("tgrep 1.10.1\n")), true);
+    assert.equal(await tgrep.isAvailable(reporting("tgrep 1.2.5\n")), false);
+    assert.equal(await tgrep.isAvailable(reporting("tgrep 1.0.8\n")), false);
+    assert.equal(await tgrep.isAvailable(reporting("tgrep 1.2.6\n", 1)), false);
+    assert.equal(await tgrep.isAvailable(reporting("tgrep, no number\n")), false);
+    assert.equal(
+      await tgrep.isAvailable(async () => {
+        throw new Error("ENOENT");
+      }),
+      false,
+    );
+  });
+
+  it("says the version it needs", () => {
+    assert.equal(tgrep.needs, "`tgrep` 1.2.6 or newer");
+  });
+});
+
 /** An engine whose answers are scripted. */
 function scripted(overrides: Partial<SearchEngine> = {}): SearchEngine {
   return {
     id: "git-grep",
     label: "scripted",
-    binary: "scripted",
+    needs: "`scripted`",
     worktree: false,
     kinds: ["grep", "file"],
     isAvailable: async () => true,

@@ -285,13 +285,13 @@ async function chooseEngine(
       return { engine: engines.tgrep };
     }
     if (await engines["git-grep"].isAvailable(deps.exec)) {
-      return { engine: engines["git-grep"], fallback: "tgrep is not installed, so git grep was used" };
+      return { engine: engines["git-grep"], fallback: `${engines.tgrep.needs} is not installed, so git grep was used` };
     }
-    throw new Error("--search auto needs `tgrep` or `git` on PATH; install one, or pass --search off");
+    throw new Error(`--search auto needs ${engines.tgrep.needs} or ${engines["git-grep"].needs} on PATH; install one, or pass --search off`);
   }
   const engine = engines[search];
   if (!(await engine.isAvailable(deps.exec))) {
-    throw new Error(`--search ${engine.id} needs \`${engine.binary}\` on PATH; install it, or choose another --search`);
+    throw new Error(`--search ${engine.id} needs ${engine.needs} on PATH; install it, or choose another --search`);
   }
   return { engine };
 }

@@ -317,9 +317,10 @@ small-change review <pr-url> --search off             # the agents get the diff 
 small-change review <pr-url> --search git-grep --max-lookups 12
 ```
 
-The default, `auto`, is [tgrep](https://github.com/microsoft/tgrep) (`brew install tgrep`). When
-`tgrep` is not on `PATH`, `auto` uses `git grep` and the output says so. A named engine that is not
-installed is an error, not a fallback.
+The default, `auto`, is [tgrep](https://github.com/microsoft/tgrep) 1.2.6 or newer. Install the
+latest with `brew install tgrep` (or `brew upgrade tgrep`). When it is not on `PATH`, or is older,
+`auto` uses `git grep` and the output says so. A named engine that is not installed is an error,
+not a fallback.
 
 | Kind | Asks for | Engines |
 | --- | --- | --- |
@@ -354,11 +355,12 @@ How it stays safe, as the PR is untrusted:
 
 | Engine | Needs | Searches |
 | --- | --- | --- |
-| `tgrep` (default) | [microsoft/tgrep](https://github.com/microsoft/tgrep) on `PATH` (or `SMALL_CHANGE_TGREP`); tried with 1.0.8 | an index built over a checkout |
+| `tgrep` (default) | [microsoft/tgrep](https://github.com/microsoft/tgrep) 1.2.6 or newer on `PATH` (or `SMALL_CHANGE_TGREP`) | an index built over a checkout |
 | `git-grep` (the fallback of `auto`) | git | the tracked files of the commit, read from git's object store; no checkout of files |
 | `graft` | the `@nanonets/graft` npm package on `PATH` (or `SMALL_CHANGE_GRAFT`) | a symbol graph built with tree-sitter; adds `callers` and `skeleton` |
 
-Measured on one machine, on a checkout of about 4,700 tracked files (TypeScript, Kotlin, Swift,
+Measured on one machine with tgrep 1.0.8 (the tgrep rows were not redone with 1.2.6; one query and the
+index were spot-checked: an index of 0.3 s and 11 to 15 ms for the query), on a checkout of about 4,700 tracked files (TypeScript, Kotlin, Swift,
 C++), cloned from a local path so that no network time is in it. Times are per request.
 
 | | checkout | setup | `grep` | `file` | `callers` / `skeleton` |
@@ -375,14 +377,17 @@ measured.
 What the engines return for the same request:
 
 - `git-grep` and `tgrep` returned the same hits (path and line) on all four `grep` queries tried
-  (4, 24, 15 and 857 hits). `tgrep` needs its index built with `--hidden --no-ignore`: by default
-  it leaves out dot files such as `.eslintrc.js` and every file that `.gitignore` matches, even a
-  file that is tracked (a force-added `dist/` file or `.env.local`; in a test repository it found
-  2 of 5 such files until the flags were added). A search that misses a file answers "not found",
-  which the agent reads as proof, so this tool builds the index with both flags and a test covers
-  it. Passing `--hidden` at query time instead makes a query about 30 times slower, so it is not
-  done. Re-measured with the flags on the same 4,700-file checkout: the same hits, an index of
-  0.25 s and 7 to 26 ms per `grep`.
+  (4, 24, 15 and 857 hits; checked again with 1.2.6). `tgrep` needs its index built with
+  `--hidden --no-ignore`: by default it leaves out dot files such as `.eslintrc.js` and every file
+  that `.gitignore` matches, even a file that is tracked (a force-added `dist/` file or
+  `.env.local`; in a test repository it found 2 of 5 such files until the flags were added). A
+  search that misses a file answers "not found", which the agent reads as proof, so this tool builds
+  the index with both flags and a test covers it. A search then passes `--hidden` and nothing else,
+  because the index holds dot files but a search leaves them out unless asked. In 1.2.6 that
+  query uses the index (0.03 s for 857 hits, against 0.35 s with `--no-ignore` and 0.75 s with both
+  flags, which make tgrep scan the tree). In 1.0.8 `--hidden` at query time made tgrep scan the tree,
+  about 30 times slower. Its search behaved differently enough that versions before 1.2.6 are
+  refused; the versions in between were not tried.
 - `graft` returned the same hits on the three queries that matched TypeScript, TSX and Kotlin
   files, and capped one query at 300 hits where git found 857. In `.swift` files it matched two
   words in full and missed a third entirely; why was not investigated. **It returned no hit in files it
@@ -439,7 +444,7 @@ The rules leave room for interpretation. These are the choices made here; each i
 - **`--search` is on by default, with tgrep.** It costs a shallow clone of the PR's commit over the
   network (6 to 16 s here) and a second model run for each agent that asks for lookups; if the clone
   fails the review goes on without them. `--search off` turns it off. `tgrep` was chosen over
-  `git-grep` for its speed (7 to 26 ms against 62 to 110 ms per request), not for better results:
+  `git-grep` for its speed (7 to 26 ms against 62 to 110 ms per request, measured with 1.0.8), not for better results:
   both returned the same hits on every query tried. It is an extra program to install, which is why
   `auto` falls back to `git grep`. `graft` is the one to choose only for `callers` and `skeleton`,
   knowing that its `grep` does not see config and build files.

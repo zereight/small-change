@@ -47,8 +47,8 @@ export interface EngineContext {
 export interface SearchEngine {
   id: SearchId;
   label: string;
-  /** The program it needs on PATH. */
-  binary: string;
+  /** What it needs on PATH, as an error message names it: a program, and its version when that matters. */
+  needs: string;
   /** Whether it reads files from a working tree; else the commit fetched into the checkout is enough. */
   worktree: boolean;
   /** What it can answer. Reading a file is always possible, through git. */
@@ -183,7 +183,7 @@ export function parseGitGrep(stdout: string, commit: string): Hit[] {
 export const gitGrep: SearchEngine = {
   id: "git-grep",
   label: "git grep",
-  binary: "git",
+  needs: "`git`",
   worktree: false,
   kinds: ["grep", "file"],
   isAvailable: (exec) => canRun(exec, "git"),
@@ -218,6 +218,28 @@ export const gitGrep: SearchEngine = {
 // tgrep: a trigram index over the working tree (https://github.com/microsoft/tgrep).
 
 const tgrepBinary = () => process.env.SMALL_CHANGE_TGREP || "tgrep";
+
+/**
+ * The oldest tgrep this tool trusts. 1.2.6 was tried; in 1.0.8 a search with `--hidden` skipped the
+ * index, so it would not work as it does here, and versions in between were not tried.
+ */
+const MIN_TGREP = [1, 2, 6] as const;
+
+/** `1.2.6` from `tgrep 1.2.6`, or undefined. */
+export function parseVersion(text: string): [number, number, number] | undefined {
+  const match = /(\d+)\.(\d+)\.(\d+)/.exec(text);
+  return match === null ? undefined : [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+export function olderThan(version: readonly number[], minimum: readonly number[]): boolean {
+  for (let index = 0; index < minimum.length; index++) {
+    const difference = (version[index] ?? 0) - (minimum[index] ?? 0);
+    if (difference !== 0) {
+      return difference < 0;
+    }
+  }
+  return false;
+}
 
 /** Reads `tgrep --json` output (ripgrep's format): one JSON object per line, `match` ones are hits. */
 export function parseTgrepJson(stdout: string): Hit[] {
@@ -256,18 +278,24 @@ async function scratchHome(checkout: Checkout): Promise<string> {
 export const tgrep: SearchEngine = {
   id: "tgrep",
   label: "tgrep",
-  binary: "tgrep",
+  needs: `\`tgrep\` ${MIN_TGREP.join(".")} or newer`,
   worktree: true,
   kinds: ["grep", "file"],
-  isAvailable: (exec) => canRun(exec, tgrepBinary()),
+  async isAvailable(exec) {
+    try {
+      const result = await exec(tgrepBinary(), ["--version"], { timeoutMs: 15_000 });
+      const version = result.code === 0 ? parseVersion(result.stdout) : undefined;
+      return version !== undefined && !olderThan(version, MIN_TGREP);
+    } catch {
+      return false;
+    }
+  },
   async prepare(context, timeoutMs) {
     const { checkout } = context;
     const env = { ...context.env, HOME: await scratchHome(checkout) };
     // --hidden and --no-ignore: by default the index leaves out dot files (`.eslintrc.js`,
     // `.github/...`) and files that .gitignore matches, such as a tracked `dist/` or `.env.local`.
-    // All of them are tracked code, and a search that misses one answers "not found". A search must
-    // not pass `--hidden`, `--no-ignore` or `-g` itself: `--hidden` and `-g` make tgrep skip the
-    // index and scan the tree, which is thirty times slower.
+    // All of them are tracked code, and a search that misses one answers "not found".
     const built = await context.exec(tgrepBinary(), ["--no-config", "index", "--force", "--hidden", "--no-ignore", checkout.dir], { cwd: checkout.dir, env, timeoutMs });
     if (built.code !== 0) {
       throw new Error(`tgrep index failed: ${stderrTail(built.stderr, 2) || `exit code ${built.code}`}`);
@@ -286,6 +314,10 @@ export const tgrep: SearchEngine = {
     const args = [
       "--no-config",
       "--json",
+      // Dot files are in the index but a search leaves them out unless it asks. This is the only
+      // flag to pass: `--no-ignore` and `-g` make tgrep skip the index and scan the tree, which is
+      // many times slower. (In tgrep 1.0.8 `--hidden` skipped the index too, hence MIN_TGREP.)
+      "--hidden",
       ...(need.ignoreCase ? ["-i"] : []),
       ...(need.regex ? [] : ["-F"]),
       "-e",
@@ -385,7 +417,7 @@ async function graft(context: EngineContext, args: string[], timeoutMs: number):
 export const graftEngine: SearchEngine = {
   id: "graft",
   label: "graft",
-  binary: "graft",
+  needs: "`graft`",
   worktree: true,
   kinds: ["grep", "file", "callers", "skeleton"],
   isAvailable: (exec) => canRun(exec, graftBinary()),

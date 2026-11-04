@@ -405,7 +405,7 @@ describe("runReview with lookups", () => {
     const engine: SearchEngine = {
       id: "git-grep",
       label: "git grep",
-      binary: "git",
+      needs: "`git`",
       worktree: false,
       kinds: ["grep", "file"],
       isAvailable: async () => true,
@@ -453,7 +453,7 @@ describe("runReview with lookups", () => {
   describe("--search auto", () => {
     const auto = { ...OPTIONS, search: "auto" as const };
     const named = (id: "tgrep" | "git-grep", available: boolean) =>
-      fakeEngine(undefined, { id, label: id === "tgrep" ? "tgrep" : "git grep", binary: id === "tgrep" ? "tgrep" : "git", isAvailable: async () => available });
+      fakeEngine(undefined, { id, label: id === "tgrep" ? "tgrep" : "git grep", needs: id === "tgrep" ? "`tgrep` 1.2.6 or newer" : "`git`", isAvailable: async () => available });
 
     function twoEngines(tgrepAvailable: boolean, gitAvailable = true) {
       const t = named("tgrep", tgrepAvailable);
@@ -477,28 +477,28 @@ describe("runReview with lookups", () => {
       const result = await runReview(deps, REF, auto);
       assert.deepEqual(t.asked, []);
       assert.deepEqual(g.asked, ["sync()"]);
-      assert.equal(result.lookups?.note, "tgrep is not installed, so git grep was used");
-      assert.match(formatReview(result, false), /lookups: tgrep is not installed, so git grep was used/);
+      assert.equal(result.lookups?.note, "`tgrep` 1.2.6 or newer is not installed, so git grep was used");
+      assert.match(formatReview(result, false), /lookups: `tgrep` 1.2.6 or newer is not installed, so git grep was used/);
     });
 
     it("stops before anything is read when neither is installed", async () => {
       const { deps, made } = twoEngines(false, false);
-      await assert.rejects(runReview(deps, REF, auto), /--search auto needs `tgrep` or `git` on PATH/);
+      await assert.rejects(runReview(deps, REF, auto), /--search auto needs `tgrep` 1.2.6 or newer or `git` on PATH/);
       assert.equal(made.requests.length, 0);
       assert.deepEqual(made.reads, []);
     });
 
     it("does not fall back from an engine that was named", async () => {
       const { deps, made } = twoEngines(false);
-      await assert.rejects(runReview(deps, REF, { ...OPTIONS, search: "tgrep" }), /--search tgrep needs `tgrep` on PATH/);
+      await assert.rejects(runReview(deps, REF, { ...OPTIONS, search: "tgrep" }), /--search tgrep needs `tgrep` 1.2.6 or newer on PATH/);
       assert.equal(made.requests.length, 0);
     });
   });
 
   it("stops before anything is read when the engine's program is missing", async () => {
-    const { engine } = fakeEngine(undefined, { isAvailable: async () => false, id: "tgrep", binary: "tgrep" });
+    const { engine } = fakeEngine(undefined, { isAvailable: async () => false, id: "tgrep", needs: "`tgrep` 1.2.6 or newer" });
     const made = withLookups({ answer: answer() }, engine);
-    await assert.rejects(runReview(made.deps, REF, { ...search, search: "tgrep" }), /--search tgrep needs `tgrep` on PATH/);
+    await assert.rejects(runReview(made.deps, REF, { ...search, search: "tgrep" }), /--search tgrep needs `tgrep` 1.2.6 or newer on PATH/);
     assert.equal(made.requests.length, 0);
     assert.deepEqual(made.reads, []);
     assert.equal(made.checkout.requests.length, 0);

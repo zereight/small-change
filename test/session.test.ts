@@ -35,7 +35,7 @@ function parts(options: { hits?: Hit[]; prepare?: SearchEngine["prepare"]; hash?
   const engine: SearchEngine = {
     id: "tgrep",
     label: "tgrep",
-    binary: "tgrep",
+    needs: "`tgrep`",
     worktree: true,
     kinds: ["grep", "file"],
     isAvailable: async () => true,
