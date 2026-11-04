@@ -87,13 +87,26 @@ The file is read from the **destination branch**, never from the PR, and a PR th
 
 ## Install
 
-Requires Node.js 24 or later.
+Requires Node.js 24 or later. The package is not on npm, and nothing needs installing: `npx` runs
+it straight from this repository.
+
+```sh
+npx --yes github:zereight/small-change --help
+npx --yes github:zereight/small-change <PR URL> --kind backend
+```
+
+The first run clones the repository and builds it, which takes about half a minute. Each later run
+asks GitHub for the latest commit, so a new commit is picked up on its own and an unchanged one
+costs about three seconds. To stay on one version, name a commit or tag:
+`github:zereight/small-change#<commit>`. The commands below are written as `small-change ...`;
+with `npx` that is `npx --yes github:zereight/small-change ...`.
+
+To work on the code, clone it:
 
 ```sh
 git clone https://github.com/zereight/small-change.git
 cd small-change
-npm install
-npm run build
+npm install        # also builds, through the `prepare` script
 node dist/cli.js --help
 ```
 
