@@ -61,6 +61,9 @@ export function parseCliArgs(argv: string[]): CliInput {
   if (url === undefined) {
     throw new UsageError("Missing required argument: <PR URL>");
   }
+  if (url === "review" || url === "model") {
+    throw new UsageError(`The "${url}" command was removed: this tool only checks whether a PR is a small change`);
+  }
   if (extra.length > 0) {
     throw new UsageError(`Unexpected extra arguments: ${extra.join(" ")}`);
   }

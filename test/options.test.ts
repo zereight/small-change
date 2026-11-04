@@ -11,6 +11,13 @@ function run(...args: string[]) {
 }
 
 describe("parseCliArgs", () => {
+  it("says that review and model were removed, instead of reading them as a PR URL", () => {
+    for (const command of ["review", "model"]) {
+      assert.throws(() => parseCliArgs([command, URL, "--kind", "backend"]), (error) => error instanceof UsageError && error.message.includes(`The "${command}" command was removed`));
+    }
+    assert.throws(() => parseCliArgs(["review"]), /was removed/);
+  });
+
   it("applies the defaults of the policy", () => {
     const { ref, options } = run(URL, "--kind", "backend");
     assert.deepEqual(ref, { workspace: "team", repo: "repo", id: 7 });

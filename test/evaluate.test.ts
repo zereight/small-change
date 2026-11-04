@@ -40,9 +40,7 @@ function fakeBitbucket(world: World) {
       return {
         id: REF.id,
         title: "Change",
-        description: "",
         author: { uuid: "{author}", name: "Alice" },
-        sourceCommit: "src123",
         destinationCommit: "dest123",
       };
     },

@@ -12,13 +12,7 @@ export interface Person {
 export interface PullRequest {
   id: number;
   title: string;
-  /** The PR's description (Markdown), empty when there is none. */
-  description: string;
   author: Person;
-  /** The source branch's tip: the commit a review of the diff belongs to. */
-  sourceCommit: string;
-  /** The repository the source branch lives in: a fork, when the PR comes from one. Absent when unknown. */
-  sourceRepository?: RepositoryRef;
   /** The destination branch's tip. The exclusion file is read here, never from the PR's own head. */
   destinationCommit: string;
 }
@@ -50,16 +44,6 @@ export interface Bitbucket {
   listMergedPullRequestIds(repository: RepositoryRef, authorUuid: string): AsyncIterable<number>;
   /** The file's text at `commit`, or undefined when it does not exist there. */
   getFile(repository: RepositoryRef, commit: string, path: string): Promise<string | undefined>;
-}
-
-/** What a review adds to {@link Bitbucket}: the diff to read and a comment to post. */
-export interface BitbucketReview extends Bitbucket {
-  /** The PR's unified diff. */
-  getDiff(ref: PullRequestRef): Promise<string>;
-  /** Posts a general (not inline) comment and returns its id. Needs write access to pull requests. */
-  postComment(ref: PullRequestRef, body: string): Promise<number>;
-  /** The full hash of a commit given by a short one, or undefined when the repository has no such commit. */
-  getCommitHash(repository: RepositoryRef, commit: string): Promise<string | undefined>;
 }
 
 export class HttpError extends Error {
@@ -96,19 +80,15 @@ interface Page<T> {
   next?: string;
 }
 
-export function createBitbucket(options: BitbucketOptions = {}): BitbucketReview {
+export function createBitbucket(options: BitbucketOptions = {}): Bitbucket {
   const doFetch = options.fetch ?? fetch;
   const headers = authorizationHeaders(options.token);
   const hasToken = Boolean(options.token);
 
-  async function getResponse(url: string, init: RequestInit = {}): Promise<Response> {
+  async function getResponse(url: string): Promise<Response> {
     let response: Response;
     try {
-      response = await doFetch(url, {
-        ...init,
-        headers: { ...headers, ...(init.headers as Record<string, string> | undefined) },
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      });
+      response = await doFetch(url, { headers, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
     } catch (error) {
       if (error instanceof Error && error.name === "TimeoutError") {
         throw new Error(`Bitbucket request timed out after ${REQUEST_TIMEOUT_MS} ms: ${url}`);
@@ -165,25 +145,18 @@ export function createBitbucket(options: BitbucketOptions = {}): BitbucketReview
       const raw = await getJson<{
         id: number;
         title?: string;
-        description?: string | null;
         author?: RawPerson;
-        source?: { commit?: { hash?: string } | null; repository?: { full_name?: string } | null };
         destination?: { commit?: { hash?: string } | null };
       }>(pullRequestUrl(ref));
       const destinationCommit = raw.destination?.commit?.hash;
-      const sourceCommit = raw.source?.commit?.hash;
-      if (destinationCommit === undefined || sourceCommit === undefined) {
-        throw new Error(`Bitbucket returned no source or destination commit for pull request ${ref.id}`);
+      if (destinationCommit === undefined) {
+        throw new Error(`Bitbucket returned no destination commit for pull request ${ref.id}`);
       }
-      const sourceRepository = toRepository(raw.source?.repository?.full_name);
       return {
         id: raw.id,
         title: raw.title ?? "",
-        description: raw.description ?? "",
         author: toPerson(raw.author),
-        sourceCommit,
         destinationCommit,
-        ...(sourceRepository === undefined ? {} : { sourceRepository }),
       };
     },
 
@@ -245,50 +218,6 @@ export function createBitbucket(options: BitbucketOptions = {}): BitbucketReview
       }
     },
 
-    async getDiff(ref) {
-      // The diff endpoint answers with a redirect to the same host; fetch follows it.
-      return (await getResponse(`${pullRequestUrl(ref)}/diff`)).text();
-    },
-
-    async postComment(ref, body) {
-      let response: Response;
-      try {
-        response = await getResponse(`${pullRequestUrl(ref)}/comments`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ content: { raw: body } }),
-        });
-      } catch (error) {
-        if (error instanceof HttpError && (error.status === 401 || error.status === 403)) {
-          throw new HttpError(
-            `${error.message} — posting needs a token with write access to pull requests`,
-            error.status,
-          );
-        }
-        throw error;
-      }
-      const created = (await response.json()) as { id?: number };
-      if (typeof created.id !== "number") {
-        throw new Error("Bitbucket accepted the comment but returned no id");
-      }
-      return created.id;
-    },
-
-    async getCommitHash(repository, commit) {
-      if (!/^[0-9a-f]{7,64}$/.test(commit)) {
-        throw new Error(`Not a commit hash: ${JSON.stringify(commit)}`);
-      }
-      try {
-        const body = await getJson<{ hash?: string }>(`${repositoryUrl(repository)}/commit/${commit}`);
-        return typeof body.hash === "string" && /^[0-9a-f]{40,64}$/.test(body.hash) ? body.hash : undefined;
-      } catch (error) {
-        if (error instanceof HttpError && error.status === 404) {
-          return undefined;
-        }
-        throw error;
-      }
-    },
-
     async getFile(repository, commit, path) {
       try {
         const encoded = path.split("/").map(encodeURIComponent).join("/");
@@ -301,14 +230,6 @@ export function createBitbucket(options: BitbucketOptions = {}): BitbucketReview
       }
     },
   };
-}
-
-/** `workspace/repo` from Bitbucket's `full_name`, when both are plain slugs (they go into URLs). */
-function toRepository(fullName: string | undefined): RepositoryRef | undefined {
-  const [workspace, repo, ...rest] = (typeof fullName === "string" ? fullName : "").split("/");
-  const plain = (slug: string | undefined): slug is string =>
-    slug !== undefined && /^[A-Za-z0-9._-]+$/.test(slug) && slug !== "." && slug !== "..";
-  return rest.length === 0 && plain(workspace) && plain(repo) ? { workspace, repo } : undefined;
 }
 
 function toPerson(raw: RawPerson | undefined): Person {
