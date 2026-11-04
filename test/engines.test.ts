@@ -319,7 +319,13 @@ describe("git grep and tgrep on a real repository", () => {
     await writeFile(join(source, "logo.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x42, 0x75, 0x69, 0x6c, 0x64, 0x43, 0x6f, 0x6e, 0x66, 0x69, 0x67]));
     await writeFile(join(source, "has space.txt"), "AppConfig in a name with a space\n");
     await symlink("/etc/hosts", join(source, "link"));
+    // Tracked, and matched by .gitignore: a file somebody force-added.
+    await writeFile(join(source, ".gitignore"), "dist/\n*.log\n");
+    await mkdir(join(source, "dist"));
+    await writeFile(join(source, "dist", "out.js"), "// AppConfig in a tracked file under an ignored directory\n");
+    await writeFile(join(source, "run.log"), "AppConfig in a tracked file that an ignore pattern matches\n");
     git("add", "-A");
+    git("add", "-f", "dist/out.js", "run.log");
     git("commit", "-q", "-m", "one");
     const commit = git("rev-parse", "HEAD").trim();
     checkoutA = await createCheckout(defaultExec, { url: `file://${source}`, commit, worktree: false, timeoutMs: 60_000 });
@@ -335,7 +341,7 @@ describe("git grep and tgrep on a real repository", () => {
 
   it("git grep searches the tree of the commit, including dot files and names with spaces, and skips binary files", async () => {
     const hits = await gitGrep.grep(makeContext(checkoutA as Checkout), { kind: "grep", pattern: "AppConfig", regex: false, ignoreCase: false });
-    assert.deepEqual(paths(hits), [".eslintrc.js:1", "core/android/A.kt:1", "core/android/A.kt:2", "core/android/B.kt:1", "has space.txt:1", "web/app.ts:1"]);
+    assert.deepEqual(paths(hits), [".eslintrc.js:1", "core/android/A.kt:1", "core/android/A.kt:2", "core/android/B.kt:1", "dist/out.js:1", "has space.txt:1", "run.log:1", "web/app.ts:1"]);
     assert.equal(hits.find((hit) => hit.path === "web/app.ts")?.text, "// AppConfig is native only");
   });
 
@@ -364,7 +370,7 @@ describe("git grep and tgrep on a real repository", () => {
     assert.match(binary.note ?? "", /binary/);
   });
 
-  it("tgrep finds the same hits as git grep, including in dot files", { skip: !hasTgrep }, async () => {
+  it("tgrep finds the same hits as git grep, including in dot files and in tracked files that .gitignore matches", { skip: !hasTgrep }, async () => {
     const context = makeContext(checkoutB as Checkout);
     await tgrep.prepare(context, 60_000);
     const need = { kind: "grep" as const, pattern: "AppConfig", regex: false, ignoreCase: false };
@@ -372,6 +378,7 @@ describe("git grep and tgrep on a real repository", () => {
     const viaGit = await gitGrep.grep(makeContext(checkoutA as Checkout), need);
     assert.deepEqual(paths(viaTgrep), paths(viaGit));
     assert.ok(paths(viaTgrep).includes(".eslintrc.js:1"));
+    assert.ok(paths(viaTgrep).includes("dist/out.js:1") && paths(viaTgrep).includes("run.log:1"));
     assert.ok(!viaTgrep.some((hit) => hit.path.startsWith(".git/") || hit.path.startsWith(".tgrep")));
   });
 

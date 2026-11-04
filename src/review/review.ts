@@ -32,8 +32,8 @@ export interface ReviewOptions {
   post: boolean;
   /** Whether to have the verifier try to refute the P1 and P2 findings, when one is configured. */
   verifier: boolean;
-  /** The engine that answers the agents' requests to see more code, or `off`. */
-  search: SearchId | "off";
+  /** The engine that answers the agents' requests to see more code. `auto`: tgrep, else git grep. */
+  search: SearchId | "auto" | "off";
   /** The most lookups one agent may ask for in a turn. */
   maxLookups: number;
   timeoutMs: number;
@@ -97,10 +97,7 @@ export async function runReview(
 ): Promise<ReviewResult> {
   const { bitbucket, provider, config } = deps;
   const started = performance.now();
-  const engine = options.search === "off" ? undefined : (deps.engines ?? ENGINES)[options.search];
-  if (engine !== undefined && !(await engine.isAvailable(deps.exec))) {
-    throw new Error(`--search ${engine.id} needs \`${engine.binary}\` on PATH; install it, or choose another --search`);
-  }
+  const { engine, fallback } = await chooseEngine(deps, options.search);
   const verifier = options.verifier ? deps.verifier : undefined;
   if (verifier !== undefined && !(await verifier.provider.isInstalled(deps.exec))) {
     throw new Error(
@@ -164,6 +161,9 @@ export async function runReview(
   const session = opened?.session;
   if (opened !== undefined) {
     result.lookups = opened.summary;
+    if (fallback !== undefined) {
+      opened.summary.note = fallback;
+    }
   }
 
   try {
@@ -269,6 +269,34 @@ export async function runReview(
 }
 
 /**
+ * The engine for `--search`. `auto` is tgrep when it is installed, else git grep, and says so in
+ * `fallback`; a named engine that is not installed is an error, found before anything is read.
+ */
+async function chooseEngine(
+  deps: ReviewDeps,
+  search: ReviewOptions["search"],
+): Promise<{ engine?: SearchEngine; fallback?: string }> {
+  if (search === "off") {
+    return {};
+  }
+  const engines = deps.engines ?? ENGINES;
+  if (search === "auto") {
+    if (await engines.tgrep.isAvailable(deps.exec)) {
+      return { engine: engines.tgrep };
+    }
+    if (await engines["git-grep"].isAvailable(deps.exec)) {
+      return { engine: engines["git-grep"], fallback: "tgrep is not installed, so git grep was used" };
+    }
+    throw new Error("--search auto needs `tgrep` or `git` on PATH; install one, or pass --search off");
+  }
+  const engine = engines[search];
+  if (!(await engine.isAvailable(deps.exec))) {
+    throw new Error(`--search ${engine.id} needs \`${engine.binary}\` on PATH; install it, or choose another --search`);
+  }
+  return { engine };
+}
+
+/**
  * Runs an agent. When it answers its first turn with a list of lookups, they are run and the
  * agent gets a second and last turn with the results in the material.
  */
@@ -340,6 +368,7 @@ function lookupLines(lookups: LookupSummary | undefined): string[] {
   }
   const { timings } = lookups;
   const lines = [
+    ...(lookups.note === undefined ? [] : [`lookups: ${lookups.note}`]),
     `lookups: ${lookups.label}, ${lookups.requests} request(s) answered${lookups.failed > 0 ? ` (${lookups.failed} could not be run)` : ""}, ${lookups.shown} line(s) shown of ${lookups.found} found` +
       `${lookups.ignored > 0 ? `; ${lookups.ignored} request(s) were not valid or over the limit` : ""}` +
       `; checkout ${seconds(timings.checkoutMs)}, setup ${seconds(timings.prepareMs)}, requests ${seconds(timings.lookupMs)}`,

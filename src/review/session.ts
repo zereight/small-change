@@ -14,6 +14,8 @@ export interface LookupSummary {
   /** `unavailable`: the checkout or the engine's setup failed, and the review went on without lookups. */
   status: "ok" | "unavailable";
   error?: string;
+  /** Something the reader should know about how the engine was chosen. */
+  note?: string;
   /** How many times each agent asked for lookups. */
   asked: Record<Agent, number>;
   requests: number;

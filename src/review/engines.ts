@@ -263,10 +263,12 @@ export const tgrep: SearchEngine = {
   async prepare(context, timeoutMs) {
     const { checkout } = context;
     const env = { ...context.env, HOME: await scratchHome(checkout) };
-    // --hidden: by default the index leaves out dot files (`.eslintrc.js`, `.github/...`), which
-    // are tracked code. A search must not pass `--hidden` or `-g` itself: either one makes tgrep
-    // skip the index and scan the tree, which is thirty times slower.
-    const built = await context.exec(tgrepBinary(), ["--no-config", "index", "--force", "--hidden", checkout.dir], { cwd: checkout.dir, env, timeoutMs });
+    // --hidden and --no-ignore: by default the index leaves out dot files (`.eslintrc.js`,
+    // `.github/...`) and files that .gitignore matches, such as a tracked `dist/` or `.env.local`.
+    // All of them are tracked code, and a search that misses one answers "not found". A search must
+    // not pass `--hidden`, `--no-ignore` or `-g` itself: `--hidden` and `-g` make tgrep skip the
+    // index and scan the tree, which is thirty times slower.
+    const built = await context.exec(tgrepBinary(), ["--no-config", "index", "--force", "--hidden", "--no-ignore", checkout.dir], { cwd: checkout.dir, env, timeoutMs });
     if (built.code !== 0) {
       throw new Error(`tgrep index failed: ${stderrTail(built.stderr, 2) || `exit code ${built.code}`}`);
     }

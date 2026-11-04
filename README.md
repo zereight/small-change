@@ -304,17 +304,22 @@ Limits observed on a real machine:
 ## Looking up more code: `--search`
 
 A finding often rests on code the diff and the changed files do not show: who else calls a
-function, whether the same import is used elsewhere, what a definition says. Without `--search`
-(the default) the agent can only guess. With it, the agent may answer its first turn with
+function, whether the same import is used elsewhere, what a definition says. With `--search off`
+the agent can only guess. By default the agent may answer its first turn with
 `{"lookups":[...]}` instead of findings. This tool runs the lookups on a checkout of the PR's source
 commit, adds the answers to the material and gives the agent one more turn, in which it must answer.
 The verifier gets the same offer. A quote copied from a lookup result counts as proof like a quote
 from the diff, so a refutation can cite a file that the PR does not touch.
 
 ```sh
-small-change review <pr-url> --search git-grep        # needs only git
-small-change review <pr-url> --search tgrep --max-lookups 12
+small-change review <pr-url>                          # --search auto: tgrep, else git grep
+small-change review <pr-url> --search off             # the agents get the diff and the changed files only
+small-change review <pr-url> --search git-grep --max-lookups 12
 ```
+
+The default, `auto`, is [tgrep](https://github.com/microsoft/tgrep) (`brew install tgrep`). When
+`tgrep` is not on `PATH`, `auto` uses `git grep` and the output says so. A named engine that is not
+installed is an error, not a fallback.
 
 | Kind | Asks for | Engines |
 | --- | --- | --- |
@@ -349,8 +354,8 @@ How it stays safe, as the PR is untrusted:
 
 | Engine | Needs | Searches |
 | --- | --- | --- |
-| `git-grep` | git | the tracked files of the commit, read from git's object store; no checkout of files |
-| `tgrep` | [microsoft/tgrep](https://github.com/microsoft/tgrep) on `PATH` (or `SMALL_CHANGE_TGREP`) | an index built over a checkout |
+| `tgrep` (default) | [microsoft/tgrep](https://github.com/microsoft/tgrep) on `PATH` (or `SMALL_CHANGE_TGREP`); tried with 1.0.8 | an index built over a checkout |
+| `git-grep` (the fallback of `auto`) | git | the tracked files of the commit, read from git's object store; no checkout of files |
 | `graft` | the `@nanonets/graft` npm package on `PATH` (or `SMALL_CHANGE_GRAFT`) | a symbol graph built with tree-sitter; adds `callers` and `skeleton` |
 
 Measured on one machine, on a checkout of about 4,700 tracked files (TypeScript, Kotlin, Swift,
@@ -370,9 +375,14 @@ measured.
 What the engines return for the same request:
 
 - `git-grep` and `tgrep` returned the same hits (path and line) on all four `grep` queries tried
-  (4, 24, 15 and 857 hits). `tgrep` needs its index built with `--hidden`, because by default it
-  leaves out dot files such as `.eslintrc.js` that are tracked; this tool does that. Passing
-  `--hidden` at query time instead makes a query about 30 times slower, so it is not done.
+  (4, 24, 15 and 857 hits). `tgrep` needs its index built with `--hidden --no-ignore`: by default
+  it leaves out dot files such as `.eslintrc.js` and every file that `.gitignore` matches, even a
+  file that is tracked (a force-added `dist/` file or `.env.local`; in a test repository it found
+  2 of 5 such files until the flags were added). A search that misses a file answers "not found",
+  which the agent reads as proof, so this tool builds the index with both flags and a test covers
+  it. Passing `--hidden` at query time instead makes a query about 30 times slower, so it is not
+  done. Re-measured with the flags on the same 4,700-file checkout: the same hits, an index of
+  0.25 s and 7 to 26 ms per `grep`.
 - `graft` returned the same hits on the three queries that matched TypeScript, TSX and Kotlin
   files, and capped one query at 300 hits where git found 857. In `.swift` files it matched two
   words in full and missed a third entirely; why was not investigated. **It returned no hit in files it
@@ -426,10 +436,13 @@ The rules leave room for interpretation. These are the choices made here; each i
   a PR counts for every affected service it touches. It stops when each service has enough, or after
   `--history-limit` PRs (default 100), in which case the check fails. The PRs are read one at a time,
   at about a second each, so 100 PRs take a couple of minutes.
-- **`--search` is off by default.** It needs a clone over the network, a search program and a
-  second model run per agent that asks. `git-grep` is the engine to start with: no install, and the
-  same hits as `tgrep` on every query tried. `graft` is the one to choose only for `callers` and
-  `skeleton`, knowing that its `grep` does not see config and build files.
+- **`--search` is on by default, with tgrep.** It costs a shallow clone of the PR's commit over the
+  network (6 to 16 s here) and a second model run for each agent that asks for lookups; if the clone
+  fails the review goes on without them. `--search off` turns it off. `tgrep` was chosen over
+  `git-grep` for its speed (7 to 26 ms against 62 to 110 ms per request), not for better results:
+  both returned the same hits on every query tried. It is an extra program to install, which is why
+  `auto` falls back to `git grep`. `graft` is the one to choose only for `callers` and `skeleton`,
+  knowing that its `grep` does not see config and build files.
 - **Only unresolved findings count.** Without `--bot`, a comment from anyone that matches the
   pattern is a finding; `--bot` narrows that to the named review bots (name, nickname or UUID).
 - **A renamed file counts on both sides**: its old and new path are both checked against the
