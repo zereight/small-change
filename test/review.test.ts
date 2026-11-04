@@ -202,8 +202,8 @@ describe("runReview", () => {
     const result = await runReview(world.deps, REF, OPTIONS);
     assert.equal(result.findings[0]?.severity, "P3");
     assert.equal(world.posted[0]?.split("\n")[0], "**P3** Bug");
-    assert.match(world.posted[0] ?? "", /_Graded P3, not P1: no evidence quote was found in the code shown\._/);
-    assert.ok(!/\bP[12]\b/.test(world.posted[0]?.split("\n")[0] ?? ""));
+    assert.match(world.posted[0] ?? "", /_Graded P3, not P\u200B1: no evidence quote was found in the code shown\._/);
+    assert.ok(!/\bP[12]\b/.test(world.posted[0] ?? ""), "the check, which reads the whole comment, does not count a P3");
   });
 
   it("accepts a quote from the expanded code that is not in the diff", async () => {
@@ -325,7 +325,8 @@ describe("runReview with a verifier", () => {
     assert.equal(result.findings[0]?.severity, "P3");
     assert.deepEqual(result.verification, { by: "muse/muse-spark-1.3", checked: 1, refuted: 1, undecided: 0 });
     assert.equal(world.posted[0]?.split("\n")[0], "**P3** Bug");
-    assert.match(world.posted[0] ?? "", /_Graded P3, not P2: the second reviewer \(muse\/muse-spark-1\.3\) refuted it: the comment says it is deliberate\._/);
+    assert.ok(!/\bP[12]\b/.test(world.posted[0] ?? ""), "a finding the second reviewer refuted is not counted by the check");
+    assert.match(world.posted[0] ?? "", /_Graded P3, not P\u200B2: the second reviewer \(muse\/muse-spark-1\.3\) refuted it: the comment says it is deliberate\._/);
     assert.match(world.posted[0] ?? "", /Against it:\n- `src\/x\.ts:3` `const b = a - 1;`/);
     assert.match(world.posted[0] ?? "", /small-change review · claude\/opus · checked by muse\/muse-spark-1\.3 · commit abc123def456/);
     assert.ok(!/\bP[12]\b/.test(world.posted[0]?.split("\n")[0] ?? ""));

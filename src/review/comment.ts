@@ -5,7 +5,7 @@ import type { Finding, Quote } from "./findings.ts";
  * comment already opens with, so running a review twice does not post twice.
  */
 export function headline(finding: Finding): string {
-  return `**${finding.severity}** ${neutralize(finding.title)}`;
+  return unblocking(finding, `**${finding.severity}** ${neutralize(finding.title)}`);
 }
 
 /**
@@ -14,6 +14,10 @@ export function headline(finding: Finding): string {
  * second reviewer used, if it refuted the finding), and who wrote it.
  */
 export function formatComment(finding: Finding, footer: string): string {
+  return unblocking(finding, comment(finding, footer));
+}
+
+function comment(finding: Finding, footer: string): string {
   const where =
     finding.path === undefined
       ? undefined
@@ -33,6 +37,17 @@ export function formatComment(finding: Finding, footer: string): string {
   ]
     .filter((part): part is string => part !== undefined)
     .join("\n\n");
+}
+
+/**
+ * The check counts a comment by matching `\bP[12]\b` anywhere in it, not only in the headline. A
+ * P3 or a question that says "Graded P3, not P1", or whose text mentions a P2, would then block the
+ * merge it was lowered to avoid blocking. So in those comments an invisible character goes between
+ * the P and the digit: it reads the same and the pattern no longer matches. P1 and P2 comments keep
+ * their text, since their headline is what the check is meant to count.
+ */
+function unblocking(finding: Finding, text: string): string {
+  return finding.severity === "P1" || finding.severity === "P2" ? text : text.replace(/\bP([12])\b/g, "P\u200B$1");
 }
 
 /** One quote as a Markdown line: `path:line` and the code in a code span, with no way out of it. */

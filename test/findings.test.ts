@@ -227,7 +227,37 @@ describe("comment", () => {
     assert.match(text, /Condition: items has one element/);
     assert.match(text, /- `src\/a\.ts:2` `const total = items\.length - 1;`/);
     assert.match(text, /Firing:\n- `throw new Error\('boom'\)`/);
-    assert.match(text, /_Graded P3, not P1: no trigger condition was given\._/);
+    assert.match(text, /_Graded P3, not P\u200B1: no trigger condition was given\._/);
+  });
+
+  describe("the default finding pattern, which the check applies to the whole comment", () => {
+    const pattern = /\bP[12]\b/i;
+    const lowered = { from: "P1" as const, reason: "the second reviewer (claude/opus) refuted it: this is not a P2 and not a P1" };
+
+    it("does not count a P3 or a question, however they came to be graded so", () => {
+      for (const severity of ["P3", "ASK"] as const) {
+        const text = formatComment(
+          { ...base, severity, title: "Not a P1", detail: "A P2 would need more", condition: "if P1 happens", evidence: [{ path: "a.ts", line: 1, quote: "const P1 = 2;" }], lowered, counter: { path: "b.ts", line: 2, quote: "// P2 is fine" } },
+          "small-change review · muse/m · commit abc",
+        );
+        assert.doesNotMatch(text, pattern, severity);
+        assert.match(text.replace(/\u200B/g, ""), /_Graded \w+, not P1: the second reviewer .*not a P2 and not a P1\._/, "reads the same without the invisible character");
+      }
+    });
+
+    it("counts a P1 or P2 by its headline, and leaves the words of its text alone", () => {
+      for (const severity of ["P1", "P2"] as const) {
+        const text = formatComment({ ...base, severity, detail: "like the P1 before" }, "f");
+        assert.match(text.split("\n")[0] as string, pattern);
+        assert.ok(text.includes("like the P1 before"));
+      }
+    });
+
+    it("keeps the same headline for skipping a repeat when a P3's title names a grade", () => {
+      const a = { ...base, severity: "P3" as const, title: "Was P1, now minor" };
+      assert.equal(formatComment(a, "f").split("\n")[0], headline(a));
+      assert.doesNotMatch(headline(a), pattern);
+    });
   });
 
   it("neutralizes mentions and images in every field, and cannot leave a code span", () => {

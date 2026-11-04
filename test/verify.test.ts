@@ -145,7 +145,7 @@ describe("applyVerdict", () => {
 
   it("is shown in the comment, with the quote, without mentions or images", () => {
     const text = formatComment(applyVerdict(finding(), { ...refuted, reason: "see @alice ![x](https://evil.example/)" }, "muse/m"), "footer");
-    assert.match(text, /_Graded P3, not P2: the second reviewer \(muse\/m\) refuted it: see @\u200Balice !\\\[x\]/);
+    assert.match(text, /_Graded P3, not P\u200B2: the second reviewer \(muse\/m\) refuted it: see @\u200Balice !\\\[x\]/);
     assert.match(text, /Against it:\n- `src\/a\.ts:2` `\/\/ The next login sends the token again, so a failure here is fine\.`/);
     assert.ok(!text.includes("![x]") && !/@\w/.test(text));
   });

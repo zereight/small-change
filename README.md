@@ -192,6 +192,43 @@ twice. Other flags: `--language`, `--max-findings`, `--max-diff-bytes`, `--conte
 `--context-lines`, `--no-verifier`, `--timeout`, `--json` (print the result as JSON), and
 `--search`, `--max-lookups` (see "Looking up more code").
 
+### What a comment looks like
+
+Each finding is one general comment on the PR. The parts that a finding does not have are left out.
+
+```markdown
+**P2** Session is refreshed on every login         <- the grade and a short title: always first
+`packages/app/src/session.ts:94`                  <- where, in the new version of the file
+What is wrong and how to fix it.                     <- the detail
+
+Condition: the user logs in twice without ...        <- the exact trigger (P1 and P2 need one)
+
+Evidence:                                            <- quotes of the code, checked by this tool
+- `packages/app/src/session.ts:94` `await refreshSession()`
+
+Firing:                                              <- only for a defect that needs an event to happen
+- `throw new Error('boom')`
+
+_Graded P3, not P1: the second reviewer (claude/opus) refuted it: ..._   <- only if the grade fell, and why
+
+Against it:                                          <- only if the second reviewer refuted it
+- `lib/other.kt:34` `import app.Settings`
+
+_small-change review · muse/muse-spark-1.3 · looked up with tgrep · checked by claude/opus · commit 6ccf83c34349_
+```
+
+The last line says who wrote it: the reviewer (`provider/model`); `looked up with <engine>` only if
+the agent's lookups were answered; `checked by <provider/model>` only if a second model looked at a
+P1 or P2; and the 12 characters of the commit that was reviewed. The first line is also what keeps a
+rerun from posting twice. `@` mentions and Markdown images in the model's text are defused.
+
+The check counts a comment when `\bP[12]\b` matches anywhere in it, not only in the first line. A
+P3 or a question that says "Graded P3, not P1" would therefore be counted, and block the merge it was
+lowered to avoid blocking. In those comments the digit is written with an invisible character after
+the `P` (`P` + U+200B + `1`): it reads the same, and the pattern does not match. Comments posted
+before this was fixed still have the plain text; resolve them in Bitbucket, since resolved comments
+are not counted.
+
 ### What a P1 or P2 needs
 
 P1 and P2 are what the check counts, so a wrong one blocks a merge. The reviewer therefore has to
