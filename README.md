@@ -426,6 +426,18 @@ those runs the reviewer itself did not search for that import; the verifier did.
 that has no findings with `off`, none of the four engines produced a P1 or P2 (`git-grep` added one
 question).
 
+Because the verifier, not the reviewer, was the one that searched for the counter-example, the
+reviewer's prompt now says to spend its lookups on refuting its own P1 and P2 candidates first (the
+same pattern already used in files the PR does not touch; who writes, resets or calls the thing it
+says nobody handles), and on its last turn to drop or lower a candidate that a result refutes. The
+verifier's prompt is unchanged. Three runs on the same PR with the default engine, against the six
+`tgrep` and `git-grep` runs above: 4 P1/P2 candidates reached the verifier (1.3 per run) against 10
+(1.7 per run), the verifier refuted 3 of 4 against 9 of 10, and one P1/P2 remained in each set. The
+reviewer's lookups looked as before (still 6 to 8 per run, mostly the same searches), and the
+Kotlin import finding did not come up in these three runs, so whether the reviewer now searches for
+it was not tested. **No effect can be told from this sample.** The instruction stays because it
+costs a few lines of prompt and the cause it addresses was seen; keep or drop it on more runs.
+
 ## Choices to check
 
 The rules leave room for interpretation. These are the choices made here; each is easy to change.

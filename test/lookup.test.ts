@@ -259,6 +259,31 @@ describe("lookupInstructions", () => {
     assert.match(lookupInstructions({ ...mode, kinds: ["grep", "file", "callers", "skeleton"] }, "findings"), /"callers".*\n.*"skeleton"/);
   });
 
+  it("asks the reviewer to look for what refutes a P1 or P2 before other lookups, by the kind of claim", () => {
+    const text = lookupInstructions(mode, "findings");
+    assert.match(text, /Look for what would refute a P1 or P2 before you file it/);
+    assert.match(text, /before any other lookup/);
+    assert.match(text, /the same pattern already used in files the pull request does not touch/);
+    assert.match(text, /write[s]?, resets, checks or calls it/);
+    assert.match(text, /needs no refutation lookup/);
+    assert.ok(text.indexOf("Look for what would refute") < text.indexOf("Ask for at most 5 lookups"), "the refutation comes before the budget");
+  });
+
+  it("tells the reviewer on its last turn what to do with a result that refutes a candidate", () => {
+    const text = lookupInstructions({ ...mode, final: true }, "findings");
+    assert.match(text, /Check each P1 and P2 candidate against the results/);
+    assert.match(text, /drop the finding, or file it as P3 or ASK/);
+    assert.match(text, /copy the line as evidence/);
+  });
+
+  it("does not give the verifier the reviewer's refutation instructions", () => {
+    for (const final of [false, true]) {
+      const text = lookupInstructions({ ...mode, final }, "verdicts");
+      assert.doesNotMatch(text, /refute a P1 or P2 before you file it/);
+      assert.doesNotMatch(text, /Check each P1 and P2 candidate/);
+    }
+  });
+
   it("names verdicts for the verifier", () => {
     assert.match(lookupInstructions(mode, "verdicts"), /instead of verdicts/);
     assert.match(lookupInstructions(mode, "verdicts"), /Verdicts in an answer that has lookups are ignored/);
